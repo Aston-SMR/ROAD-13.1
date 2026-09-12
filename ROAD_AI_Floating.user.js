@@ -4,6 +4,7 @@
 // @version      1.0
 // @description  在指定真人百家樂網站上懸浮顯示 ROAD AI
 // @match        https://new-dd-cloudfront.ywjxi.com/*
+// @match        https://ew-dd-cn.20299999.com/*
 // @run-at       document-end
 // @grant        none
 // ==/UserScript==
