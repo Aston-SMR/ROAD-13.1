@@ -6,6 +6,7 @@
 // @match        https://new-dd-cn.20299999.com/*
 // @match        https://ew-dd-cn.20299999.com/*
 // @match        https://new-dd-cloudfront.ywjxi.com/*
+// @match        https://new-dd-cn.ahsy114.com/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
