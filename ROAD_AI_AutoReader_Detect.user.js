@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ROAD AI Live Card Detect
+// @name         ROAD AI Live Packet Detect
 // @namespace    ROAD-AI
-// @version      0.6
-// @description  ROAD AI 即時牌面資料偵測器｜WebSocket Fetch XHR
+// @version      0.7
+// @description  ROAD AI 即時牌面｜WebSocket二進位封包解析
 // @match        https://new-dd-cn.20299999.com/*
 // @match        https://ew-dd-cn.20299999.com/*
 // @match        https://new-dd-cloudfront.ywjxi.com/*
@@ -14,30 +14,29 @@
 (function () {
     'use strict';
 
-    if (window.__ROAD_AI_LIVE_DETECT__) return;
-    window.__ROAD_AI_LIVE_DETECT__ = true;
+    if (window.__ROAD_AI_PACKET_DETECT__) return;
+    window.__ROAD_AI_PACKET_DETECT__ = true;
 
-    const MAX_LOG = 25;
-    const logs = [];
-
-    let wsCount = 0;
-    let fetchCount = 0;
-    let xhrCount = 0;
-    let candidateCount = 0;
+    const MAX_LOG = 18;
 
     let box = null;
-    let logBox = null;
     let statusBox = null;
+    let logBox = null;
 
-    function nowTime() {
+    let wsCount = 0;
+    let packetCount = 0;
+    let binaryCount = 0;
+
+    const logs = [];
+
+    function timeNow() {
         const d = new Date();
 
         return (
-            String(d.getHours()).padStart(2, '0') +
-            ':' +
-            String(d.getMinutes()).padStart(2, '0') +
-            ':' +
-            String(d.getSeconds()).padStart(2, '0')
+            String(d.getHours()).padStart(2, '0') + ':' +
+            String(d.getMinutes()).padStart(2, '0') + ':' +
+            String(d.getSeconds()).padStart(2, '0') + '.' +
+            String(d.getMilliseconds()).padStart(3, '0')
         );
     }
 
@@ -48,168 +47,268 @@
             .replace(/>/g, '&gt;');
     }
 
-    function clean(v) {
-        return String(v == null ? '' : v)
-            .replace(/\s+/g, ' ')
-            .trim();
+    function bytesToHex(bytes, max) {
+        const len = Math.min(bytes.length, max);
+        const out = [];
+
+        for (let i = 0; i < len; i++) {
+            out.push(
+                bytes[i]
+                    .toString(16)
+                    .padStart(2, '0')
+                    .toUpperCase()
+            );
+        }
+
+        return out.join(' ');
     }
 
-    function short(v, n) {
-        const s = clean(v);
+    function bytesToDecimal(bytes, max) {
+        const len = Math.min(bytes.length, max);
+        const out = [];
 
-        return s.length > n
-            ? s.slice(0, n) + '…'
-            : s;
+        for (let i = 0; i < len; i++) {
+            out.push(String(bytes[i]));
+        }
+
+        return out.join(',');
     }
 
-    /*
-     * 只挑看起來可能與百家樂、
-     * 牌值、勝負、局號有關的資料。
-     */
-    function looksInteresting(text) {
+    function tryUTF8(bytes) {
+        try {
+            const decoder =
+                new TextDecoder('utf-8', {
+                    fatal: false
+                });
+
+            let text = decoder.decode(bytes);
+
+            text = text
+                .replace(/\u0000/g, '·')
+                .replace(
+                    /[\u0001-\u0008\u000B\u000C\u000E-\u001F]/g,
+                    '·'
+                )
+                .trim();
+
+            if (!text) return '';
+
+            return text.length > 220
+                ? text.slice(0, 220) + '…'
+                : text;
+
+        } catch (e) {
+            return '';
+        }
+    }
+
+    function looksReadable(text) {
         if (!text) return false;
 
-        const s = String(text);
+        let printable = 0;
+
+        for (let i = 0; i < text.length; i++) {
+            const c = text.charCodeAt(i);
+
+            if (
+                c === 9 ||
+                c === 10 ||
+                c === 13 ||
+                c >= 32
+            ) {
+                printable++;
+            }
+        }
 
         return (
-            /banker|player|tie|winner|result|card|cards|poker|baccarat|round|shoe|gameNo|tableNo|閒|闲|莊|庄|和/i.test(s) ||
-
-            /"(?:A|[2-9]|10|J|Q|K)"/i.test(s) ||
-
-            /(?:^|[^A-Z0-9])(?:A|10|J|Q|K)(?:[^A-Z0-9]|$)/i.test(s)
-        );
+            printable /
+            Math.max(1, text.length)
+        ) > 0.65;
     }
 
-    function updateStatus() {
-        if (!statusBox) return;
+    function addLog(direction, bytes) {
+        packetCount++;
+        binaryCount++;
 
-        statusBox.innerHTML =
-            'WS：<b>' + wsCount + '</b>　' +
-            'Fetch：<b>' + fetchCount + '</b>　' +
-            'XHR：<b>' + xhrCount + '</b><br>' +
-            '疑似牌局資料：<b style="color:#f2c66d">' +
-            candidateCount +
-            '</b>';
-    }
-
-    function renderLogs() {
-        if (!logBox) return;
-
-        if (!logs.length) {
-            logBox.innerHTML =
-                '<div style="color:#91a0bd;margin-top:6px">' +
-                '等待新一局資料…' +
-                '</div>';
-
-            return;
-        }
-
-        logBox.innerHTML = logs
-            .map(function (x) {
-
-                return (
-                    '<div style="' +
-                    'margin-top:5px;' +
-                    'padding-top:4px;' +
-                    'border-top:1px solid #33405c">' +
-
-                    '<b style="color:#79b9ff">' +
-                    esc(x.type) +
-                    '</b> ' +
-
-                    '<span style="color:#91a0bd">' +
-                    esc(x.time) +
-                    '</span>' +
-
-                    '<div style="' +
-                    'color:#fff;' +
-                    'word-break:break-all">' +
-                    esc(x.text) +
-                    '</div>' +
-
-                    '</div>'
-                );
-            })
-            .join('');
-    }
-
-    function addCandidate(type, data) {
-        let text = '';
-
-        try {
-            if (typeof data === 'string') {
-                text = data;
-            } else if (data instanceof ArrayBuffer) {
-                text = '[ArrayBuffer ' + data.byteLength + ' bytes]';
-            } else if (ArrayBuffer.isView(data)) {
-                text =
-                    '[Binary ' +
-                    data.byteLength +
-                    ' bytes]';
-            } else {
-                text = JSON.stringify(data);
-            }
-        } catch (e) {
-            text = String(data);
-        }
-
-        if (!text) return;
-
-        /*
-         * Binary 先記錄存在，
-         * 但不假裝已經能解讀。
-         */
-        const binary =
-            /^\[(?:ArrayBuffer|Binary)/.test(text);
-
-        if (
-            !binary &&
-            !looksInteresting(text)
-        ) {
-            return;
-        }
-
-        candidateCount++;
+        const utf8 = tryUTF8(bytes);
 
         logs.unshift({
-            type: type,
-            time: nowTime(),
-            text: short(text, 600)
+            time: timeNow(),
+            direction: direction,
+            size: bytes.length,
+            hex: bytesToHex(bytes, 96),
+            dec: bytesToDecimal(bytes, 48),
+            utf8:
+                looksReadable(utf8)
+                    ? utf8
+                    : ''
         });
 
         if (logs.length > MAX_LOG) {
             logs.length = MAX_LOG;
         }
 
-        updateStatus();
-        renderLogs();
+        updateUI();
+    }
+
+    async function processData(direction, data) {
+        try {
+            if (data instanceof ArrayBuffer) {
+                addLog(
+                    direction,
+                    new Uint8Array(data)
+                );
+                return;
+            }
+
+            if (ArrayBuffer.isView(data)) {
+                addLog(
+                    direction,
+                    new Uint8Array(
+                        data.buffer,
+                        data.byteOffset,
+                        data.byteLength
+                    )
+                );
+                return;
+            }
+
+            if (
+                typeof Blob !== 'undefined' &&
+                data instanceof Blob
+            ) {
+                const buffer =
+                    await data.arrayBuffer();
+
+                addLog(
+                    direction,
+                    new Uint8Array(buffer)
+                );
+
+                return;
+            }
+
+            if (typeof data === 'string') {
+                const encoder =
+                    new TextEncoder();
+
+                addLog(
+                    direction + ' TEXT',
+                    encoder.encode(data)
+                );
+            }
+
+        } catch (e) {}
+    }
+
+    function updateUI() {
+        if (!statusBox || !logBox) return;
+
+        statusBox.innerHTML =
+            'WebSocket：<b>' +
+            wsCount +
+            '</b>　封包：<b>' +
+            packetCount +
+            '</b><br>' +
+
+            'Binary：<b style="color:#f2c66d">' +
+            binaryCount +
+            '</b>';
+
+        if (!logs.length) {
+            logBox.innerHTML =
+                '<div style="margin-top:6px;color:#91a0bd">' +
+                '等待 WebSocket 封包…' +
+                '</div>';
+
+            return;
+        }
+
+        logBox.innerHTML =
+            logs.map(function (x) {
+
+                let html =
+                    '<div style="' +
+                    'margin-top:6px;' +
+                    'padding-top:5px;' +
+                    'border-top:1px solid #33405c">' +
+
+                    '<b style="color:#79b9ff">' +
+                    esc(x.direction) +
+                    '</b> ' +
+
+                    '<span style="color:#91a0bd">' +
+                    esc(x.time) +
+                    '</span> ' +
+
+                    '<b style="color:#f2c66d">' +
+                    x.size +
+                    'B</b>';
+
+                if (x.utf8) {
+                    html +=
+                        '<div style="' +
+                        'margin-top:3px;' +
+                        'color:#38d98a;' +
+                        'word-break:break-all">' +
+                        'TXT：' +
+                        esc(x.utf8) +
+                        '</div>';
+                }
+
+                html +=
+                    '<div style="' +
+                    'margin-top:3px;' +
+                    'color:#fff;' +
+                    'word-break:break-all">' +
+                    'HEX：' +
+                    esc(x.hex) +
+                    '</div>' +
+
+                    '<div style="' +
+                    'margin-top:3px;' +
+                    'color:#aab5ca;' +
+                    'word-break:break-all">' +
+                    'DEC：' +
+                    esc(x.dec) +
+                    '</div>' +
+
+                    '</div>';
+
+                return html;
+            }).join('');
     }
 
     /*
-     * WebSocket
+     * WebSocket 攔截
      */
     try {
-        const NativeWebSocket = window.WebSocket;
+        const NativeWebSocket =
+            window.WebSocket;
 
         if (NativeWebSocket) {
 
-            const WrappedWebSocket = function () {
+            function RoadAIWebSocket() {
                 const ws =
                     Reflect.construct(
                         NativeWebSocket,
                         arguments,
-                        new.target || WrappedWebSocket
+                        new.target || RoadAIWebSocket
                     );
 
                 wsCount++;
-                updateStatus();
+
+                try {
+                    ws.binaryType =
+                        'arraybuffer';
+                } catch (e) {}
 
                 try {
                     ws.addEventListener(
                         'message',
                         function (event) {
-                            addCandidate(
-                                'WS IN',
+                            processData(
+                                'IN',
                                 event.data
                             );
                         }
@@ -220,155 +319,54 @@
                     const nativeSend =
                         ws.send;
 
-                    ws.send = function (data) {
-                        addCandidate(
-                            'WS OUT',
-                            data
-                        );
+                    ws.send =
+                        function (data) {
 
-                        return nativeSend.apply(
-                            this,
-                            arguments
-                        );
-                    };
+                            processData(
+                                'OUT',
+                                data
+                            );
+
+                            return nativeSend.apply(
+                                this,
+                                arguments
+                            );
+                        };
                 } catch (e) {}
 
-                return ws;
-            };
+                updateUI();
 
-            WrappedWebSocket.prototype =
+                return ws;
+            }
+
+            RoadAIWebSocket.prototype =
                 NativeWebSocket.prototype;
 
             try {
-                Object.defineProperties(
-                    WrappedWebSocket,
-                    {
-                        CONNECTING: {
-                            value: NativeWebSocket.CONNECTING
-                        },
-                        OPEN: {
-                            value: NativeWebSocket.OPEN
-                        },
-                        CLOSING: {
-                            value: NativeWebSocket.CLOSING
-                        },
-                        CLOSED: {
-                            value: NativeWebSocket.CLOSED
-                        }
-                    }
+                Object.setPrototypeOf(
+                    RoadAIWebSocket,
+                    NativeWebSocket
                 );
             } catch (e) {}
 
-            window.WebSocket =
-                WrappedWebSocket;
-        }
-    } catch (e) {}
-
-    /*
-     * fetch
-     */
-    try {
-        const nativeFetch = window.fetch;
-
-        if (nativeFetch) {
-
-            window.fetch = function () {
-                fetchCount++;
-                updateStatus();
-
-                const p =
-                    nativeFetch.apply(
-                        this,
-                        arguments
-                    );
-
-                try {
-                    p.then(function (response) {
-
-                        try {
-                            const clone =
-                                response.clone();
-
-                            clone.text()
-                                .then(function (text) {
-                                    addCandidate(
-                                        'FETCH',
-                                        text
-                                    );
-                                })
-                                .catch(function () {});
-                        } catch (e) {}
-
-                    }).catch(function () {});
-                } catch (e) {}
-
-                return p;
-            };
-        }
-    } catch (e) {}
-
-    /*
-     * XMLHttpRequest
-     */
-    try {
-        const nativeOpen =
-            XMLHttpRequest.prototype.open;
-
-        const nativeSend =
-            XMLHttpRequest.prototype.send;
-
-        XMLHttpRequest.prototype.open =
-            function (method, url) {
-
-                try {
-                    this.__roadAiUrl =
-                        String(url || '');
-                } catch (e) {}
-
-                return nativeOpen.apply(
-                    this,
-                    arguments
-                );
-            };
-
-        XMLHttpRequest.prototype.send =
-            function () {
-
-                xhrCount++;
-                updateStatus();
-
-                try {
-                    this.addEventListener(
-                        'load',
-                        function () {
-
-                            let data = '';
-
-                            try {
-                                if (
-                                    typeof this.responseText ===
-                                    'string'
-                                ) {
-                                    data =
-                                        this.responseText;
-                                }
-                            } catch (e) {}
-
-                            if (data) {
-                                addCandidate(
-                                    'XHR',
-                                    data
-                                );
+            ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']
+                .forEach(function (name) {
+                    try {
+                        Object.defineProperty(
+                            RoadAIWebSocket,
+                            name,
+                            {
+                                value:
+                                    NativeWebSocket[name]
                             }
-                        }
-                    );
-                } catch (e) {}
+                        );
+                    } catch (e) {}
+                });
 
-                return nativeSend.apply(
-                    this,
-                    arguments
-                );
-            };
+            window.WebSocket =
+                RoadAIWebSocket;
+        }
+
     } catch (e) {}
 
     function createUI() {
@@ -377,49 +375,46 @@
         box =
             document.createElement('div');
 
-        Object.assign(
-            box.style,
-            {
-                position: 'fixed',
-                left: '4px',
-                bottom: '4px',
-                width: '255px',
-                maxHeight: '38vh',
-                overflow: 'auto',
-                zIndex: '2147483647',
-                background:
-                    'rgba(5,12,25,.96)',
-                color: '#fff',
-                border:
-                    '2px solid #f2c66d',
-                borderRadius: '9px',
-                padding: '7px',
-                fontSize: '10px',
-                lineHeight: '1.35',
-                fontFamily:
-                    '-apple-system,BlinkMacSystemFont,sans-serif',
-                pointerEvents: 'none'
-            }
-        );
+        Object.assign(box.style, {
+            position: 'fixed',
+            left: '4px',
+            bottom: '4px',
+            width: '270px',
+            maxHeight: '40vh',
+            overflow: 'auto',
+            zIndex: '2147483647',
+            background:
+                'rgba(5,12,25,.97)',
+            color: '#fff',
+            border:
+                '2px solid #f2c66d',
+            borderRadius: '9px',
+            padding: '7px',
+            fontSize: '9px',
+            lineHeight: '1.3',
+            fontFamily:
+                '-apple-system,BlinkMacSystemFont,sans-serif',
+            pointerEvents: 'none'
+        });
 
         box.innerHTML =
             '<div style="' +
             'font-size:12px;' +
             'font-weight:900;' +
             'color:#f2c66d">' +
-            'ROAD AI 即時牌面 V0.6' +
+            'ROAD AI 封包解析 V0.7' +
             '</div>' +
 
             '<div style="' +
             'color:#38d98a;' +
             'font-weight:800">' +
-            '● 等待新局資料' +
+            '● 即時解析 WebSocket' +
             '</div>' +
 
-            '<div id="road-ai-live-status"' +
+            '<div id="road-ai-packet-status"' +
             ' style="margin-top:4px"></div>' +
 
-            '<div id="road-ai-live-log"></div>';
+            '<div id="road-ai-packet-log"></div>';
 
         (
             document.documentElement ||
@@ -428,32 +423,26 @@
 
         statusBox =
             box.querySelector(
-                '#road-ai-live-status'
+                '#road-ai-packet-status'
             );
 
         logBox =
             box.querySelector(
-                '#road-ai-live-log'
+                '#road-ai-packet-log'
             );
 
-        updateStatus();
-        renderLogs();
+        updateUI();
     }
 
-    function waitForDOM() {
-        if (
-            document.documentElement
-        ) {
+    function waitDOM() {
+        if (document.documentElement) {
             createUI();
             return;
         }
 
-        setTimeout(
-            waitForDOM,
-            20
-        );
+        setTimeout(waitDOM, 20);
     }
 
-    waitForDOM();
+    waitDOM();
 
 })();
