@@ -5,6 +5,7 @@
 // @description  ROAD AI 真人桌資料結構偵測器
 // @match        https://new-dd-cn.20299999.com/*
 // @match        https://ew-dd-cn.20299999.com/*
+// @match        https://new-dd-cloudfront.ywjxi.com/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
