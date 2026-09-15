@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ROAD AI Deal Event Locator
+// @name         ROAD AI Packet Recorder
 // @namespace    ROAD-AI
-// @version      0.9
-// @description  ROAD AI 發牌事件定位｜WebSocket封包變化分組
+// @version      1.0
+// @description  ROAD AI 本局WebSocket封包錄製器
 // @match        https://new-dd-cn.20299999.com/*
 // @match        https://ew-dd-cn.20299999.com/*
 // @match        https://new-dd-cloudfront.ywjxi.com/*
@@ -14,26 +14,17 @@
 (function () {
     'use strict';
 
-    if (window.__ROAD_AI_EVENT_LOCATOR__) return;
-    window.__ROAD_AI_EVENT_LOCATOR__ = true;
+    if (window.__ROAD_AI_PACKET_RECORDER__) return;
+    window.__ROAD_AI_PACKET_RECORDER__ = true;
 
-    const WATCH_SIZES = [
-        30, 34, 57, 83, 89, 109, 112
-    ];
+    const MAX_PACKETS = 3000;
 
-    const MAX_EVENTS = 22;
-    const MAX_DIFF = 28;
+    let packets = [];
+    let wsCount = 0;
 
     let box = null;
-    let statusEl = null;
-    let logEl = null;
-
-    let wsCount = 0;
-    let totalPackets = 0;
-    let watchedPackets = 0;
-
-    const events = [];
-    const lastPacketBySize = new Map();
+    let infoEl = null;
+    let lastEl = null;
 
     function now() {
         const d = new Date();
@@ -46,27 +37,24 @@
         );
     }
 
-    function esc(value) {
-        return String(value == null ? '' : value)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;');
-    }
-
     function hex(v) {
-        if (v === undefined) return '--';
-
         return Number(v)
             .toString(16)
             .padStart(2, '0')
             .toUpperCase();
     }
 
-    function cloneBytes(bytes) {
-        return new Uint8Array(bytes);
+    function bytesToHex(bytes) {
+        const out = new Array(bytes.length);
+
+        for (let i = 0; i < bytes.length; i++) {
+            out[i] = hex(bytes[i]);
+        }
+
+        return out.join(' ');
     }
 
-    function readableText(bytes) {
+    function tryText(bytes) {
         try {
             let text = new TextDecoder(
                 'utf-8',
@@ -81,16 +69,15 @@
                 )
                 .trim();
 
-            if (!text) return '';
-
-            // 只保留比較有用的可讀字串
-            const useful =
-                text.match(
-                    /20\d{10,}[A-Za-z0-9]*|BANKER|PLAYER|TIE|RESULT|WINNER|CARD|ROUND|GAME/ig
-                );
+            /*
+             * 避免完全無意義的亂碼佔太多空間。
+             */
+            const useful = text.match(
+                /20\d{8,}[A-Za-z0-9]*|banker|player|tie|winner|result|card|round|game/ig
+            );
 
             if (useful && useful.length) {
-                return useful.join(' | ').slice(0, 180);
+                return useful.join(' | ');
             }
 
             return '';
@@ -100,158 +87,62 @@
         }
     }
 
-    function diffPacket(previous, current) {
-        if (!previous) {
-            return {
-                changed: [],
-                count: 0,
-                first: true
-            };
-        }
-
-        const changed = [];
-
-        const length = Math.max(
-            previous.length,
-            current.length
-        );
-
-        for (let i = 0; i < length; i++) {
-            const oldValue = previous[i];
-            const newValue = current[i];
-
-            if (oldValue !== newValue) {
-                changed.push({
-                    index: i,
-                    oldValue: oldValue,
-                    newValue: newValue
-                });
-            }
-        }
-
-        return {
-            changed: changed,
-            count: changed.length,
-            first: false
-        };
+    function cloneBytes(bytes) {
+        return new Uint8Array(bytes);
     }
 
-    function formatDiff(diff) {
-        if (diff.first) {
-            return '首次收到此尺寸';
-        }
+    function updateUI(lastPacket) {
+        if (!infoEl) return;
 
-        if (!diff.count) {
-            return '沒有變化';
-        }
+        infoEl.innerHTML =
+            'WS：<b>' + wsCount + '</b>　' +
+            '已錄：<b style="color:#f2c66d">' +
+            packets.length +
+            '</b>';
 
-        return diff.changed
-            .slice(0, MAX_DIFF)
-            .map(function (x) {
-                return (
-                    x.index +
-                    ':' +
-                    hex(x.oldValue) +
-                    '→' +
-                    hex(x.newValue)
-                );
-            })
-            .join('  ');
+        if (lastEl && lastPacket) {
+            lastEl.textContent =
+                '最後：' +
+                lastPacket.direction +
+                ' / ' +
+                lastPacket.size +
+                'B / ' +
+                lastPacket.time;
+        }
     }
 
-    function classify(size, diff) {
-        if (size === 30) {
-            return '短狀態';
-        }
+    function record(direction, bytes) {
+        const copy = cloneBytes(bytes);
 
-        if (size === 34) {
-            return '局號/狀態候選';
-        }
-
-        if (size === 57) {
-            return '發牌候選 A';
-        }
-
-        if (size === 83) {
-            return '發牌候選 B';
-        }
-
-        if (size === 89) {
-            return '發牌候選 C';
-        }
-
-        if (size === 109) {
-            return '牌局資料候選';
-        }
-
-        if (size === 112) {
-            return '牌局資料候選 ★';
-        }
-
-        if (diff.count <= 6) {
-            return '少量欄位變化';
-        }
-
-        return '狀態資料';
-    }
-
-    function isWatched(size, text) {
-        if (WATCH_SIZES.includes(size)) {
-            return true;
-        }
-
-        if (text) {
-            return true;
-        }
-
-        return false;
-    }
-
-    function addEvent(direction, bytes) {
-        totalPackets++;
-
-        const size = bytes.length;
-        const text = readableText(bytes);
-
-        if (!isWatched(size, text)) {
-            render();
-            return;
-        }
-
-        watchedPackets++;
-
-        const previous =
-            lastPacketBySize.get(size);
-
-        const diff =
-            diffPacket(previous, bytes);
-
-        lastPacketBySize.set(
-            size,
-            cloneBytes(bytes)
-        );
-
-        events.unshift({
+        const packet = {
+            no: packets.length + 1,
             time: now(),
             direction: direction,
-            size: size,
-            label: classify(size, diff),
-            diffCount: diff.count,
-            diffText: formatDiff(diff),
-            text: text
-        });
+            size: copy.length,
+            hex: bytesToHex(copy),
+            text: tryText(copy)
+        };
 
-        if (events.length > MAX_EVENTS) {
-            events.length = MAX_EVENTS;
+        packets.push(packet);
+
+        if (packets.length > MAX_PACKETS) {
+            packets.shift();
+
+            /*
+             * 重排編號。
+             */
+            packets.forEach(function (p, i) {
+                p.no = i + 1;
+            });
         }
 
-        render();
+        updateUI(packet);
     }
 
-    async function handleData(direction, data) {
+    async function processData(direction, data) {
         try {
             if (data instanceof ArrayBuffer) {
-                addEvent(
+                record(
                     direction,
                     new Uint8Array(data)
                 );
@@ -259,7 +150,7 @@
             }
 
             if (ArrayBuffer.isView(data)) {
-                addEvent(
+                record(
                     direction,
                     new Uint8Array(
                         data.buffer,
@@ -277,7 +168,7 @@
                 const buffer =
                     await data.arrayBuffer();
 
-                addEvent(
+                record(
                     direction,
                     new Uint8Array(buffer)
                 );
@@ -286,8 +177,8 @@
             }
 
             if (typeof data === 'string') {
-                addEvent(
-                    direction + ' TXT',
+                record(
+                    direction + '-TEXT',
                     new TextEncoder().encode(data)
                 );
             }
@@ -295,92 +186,11 @@
         } catch (e) {}
     }
 
-    function render() {
-        if (!statusEl || !logEl) return;
-
-        statusEl.innerHTML =
-            'WS：<b>' + wsCount + '</b>　' +
-            '全部：<b>' + totalPackets + '</b>　' +
-            '定位：<b style="color:#f2c66d">' +
-            watchedPackets +
-            '</b>';
-
-        if (!events.length) {
-            logEl.innerHTML =
-                '<div style="margin-top:6px;color:#91a0bd">' +
-                '等待下一局發牌…' +
-                '</div>';
-
-            return;
-        }
-
-        logEl.innerHTML = events
-            .map(function (e) {
-
-                let html =
-                    '<div style="' +
-                    'margin-top:6px;' +
-                    'padding-top:5px;' +
-                    'border-top:1px solid #34415a">' +
-
-                    '<div>' +
-
-                    '<b style="color:#79b9ff">' +
-                    esc(e.direction) +
-                    '</b> ' +
-
-                    '<span style="color:#91a0bd">' +
-                    esc(e.time) +
-                    '</span> ' +
-
-                    '<b style="color:#f2c66d">' +
-                    e.size +
-                    'B</b>' +
-
-                    '</div>' +
-
-                    '<div style="' +
-                    'color:#38d98a;' +
-                    'font-weight:800">' +
-                    esc(e.label) +
-                    '</div>' +
-
-                    '<div style="color:#ffcf70">' +
-                    '變化：' +
-                    e.diffCount +
-                    ' bytes' +
-                    '</div>' +
-
-                    '<div style="' +
-                    'color:#d5dbea;' +
-                    'word-break:break-all">' +
-                    esc(e.diffText) +
-                    '</div>';
-
-                if (e.text) {
-                    html +=
-                        '<div style="' +
-                        'margin-top:2px;' +
-                        'color:#74e3b0;' +
-                        'word-break:break-all">' +
-                        '文字：' +
-                        esc(e.text) +
-                        '</div>';
-                }
-
-                html += '</div>';
-
-                return html;
-            })
-            .join('');
-    }
-
     /*
-     * WebSocket
+     * WebSocket 攔截
      */
     try {
-        const NativeWebSocket =
-            window.WebSocket;
+        const NativeWebSocket = window.WebSocket;
 
         if (NativeWebSocket) {
 
@@ -402,7 +212,7 @@
                     ws.addEventListener(
                         'message',
                         function (event) {
-                            handleData(
+                            processData(
                                 'IN',
                                 event.data
                             );
@@ -414,7 +224,7 @@
                     const nativeSend = ws.send;
 
                     ws.send = function (data) {
-                        handleData(
+                        processData(
                             'OUT',
                             data
                         );
@@ -426,7 +236,7 @@
                     };
                 } catch (e) {}
 
-                render();
+                updateUI();
 
                 return ws;
             }
@@ -460,11 +270,134 @@
                 } catch (e) {}
             });
 
-            window.WebSocket =
-                RoadAIWebSocket;
+            window.WebSocket = RoadAIWebSocket;
         }
 
     } catch (e) {}
+
+    function buildExport() {
+        const lines = [];
+
+        lines.push('ROAD AI PACKET RECORD V1.0');
+        lines.push('HOST=' + location.hostname);
+        lines.push('TIME=' + new Date().toISOString());
+        lines.push('PACKETS=' + packets.length);
+        lines.push('');
+
+        packets.forEach(function (p) {
+            lines.push(
+                '#' + p.no +
+                ' | ' +
+                p.time +
+                ' | ' +
+                p.direction +
+                ' | ' +
+                p.size +
+                'B'
+            );
+
+            if (p.text) {
+                lines.push(
+                    'TEXT=' + p.text
+                );
+            }
+
+            lines.push(
+                'HEX=' + p.hex
+            );
+
+            lines.push('');
+        });
+
+        return lines.join('\n');
+    }
+
+    async function copyRecord() {
+        const text = buildExport();
+
+        try {
+            await navigator.clipboard.writeText(text);
+
+            setMessage('✓ 已複製 ' + packets.length + ' 個封包');
+            return;
+
+        } catch (e) {}
+
+        /*
+         * iOS clipboard fallback
+         */
+        try {
+            const ta =
+                document.createElement('textarea');
+
+            ta.value = text;
+
+            Object.assign(ta.style, {
+                position: 'fixed',
+                left: '-9999px',
+                top: '0'
+            });
+
+            document.body.appendChild(ta);
+
+            ta.focus();
+            ta.select();
+
+            const ok =
+                document.execCommand('copy');
+
+            ta.remove();
+
+            if (ok) {
+                setMessage(
+                    '✓ 已複製 ' +
+                    packets.length +
+                    ' 個封包'
+                );
+            } else {
+                setMessage('複製失敗');
+            }
+
+        } catch (e) {
+            setMessage('複製失敗');
+        }
+    }
+
+    function clearRecord() {
+        packets = [];
+
+        updateUI();
+
+        if (lastEl) {
+            lastEl.textContent =
+                '已清空，等待本局…';
+        }
+
+        setMessage('● 開始錄製本局');
+    }
+
+    function setMessage(text) {
+        const el =
+            document.getElementById(
+                'road-ai-rec-message'
+            );
+
+        if (!el) return;
+
+        el.textContent = text;
+
+        clearTimeout(
+            setMessage.__timer
+        );
+
+        setMessage.__timer =
+            setTimeout(function () {
+                if (el) {
+                    el.textContent =
+                        '● 錄製中';
+                }
+            }, 1800);
+    }
 
     function createUI() {
         if (box) return;
@@ -474,69 +407,119 @@
 
         Object.assign(box.style, {
             position: 'fixed',
-            left: '4px',
-            bottom: '4px',
-            width: '270px',
-            maxHeight: '39vh',
-            overflow: 'auto',
+            left: '5px',
+            bottom: '5px',
+            width: '245px',
             zIndex: '2147483647',
-            background: 'rgba(5,12,25,.97)',
+            background: 'rgba(5,12,25,.96)',
             color: '#fff',
             border: '2px solid #f2c66d',
-            borderRadius: '9px',
-            padding: '7px',
-            fontSize: '9px',
-            lineHeight: '1.3',
+            borderRadius: '10px',
+            padding: '8px',
+            fontSize: '10px',
+            lineHeight: '1.35',
             fontFamily:
                 '-apple-system,BlinkMacSystemFont,sans-serif',
-
-            /*
-             * 偵測期間不擋牌桌操作
-             */
-            pointerEvents: 'none'
+            boxShadow:
+                '0 4px 18px rgba(0,0,0,.45)',
+            pointerEvents: 'auto'
         });
 
         box.innerHTML =
             '<div style="' +
-            'font-size:12px;' +
+            'font-size:13px;' +
             'font-weight:900;' +
-            'color:#f2c66d">' +
-            'ROAD AI 發牌定位 V0.9' +
+            'color:#f2c66d;' +
+            'margin-bottom:2px">' +
+            'ROAD AI 封包錄製 V1.0' +
             '</div>' +
 
-            '<div style="' +
+            '<div id="road-ai-rec-message"' +
+            ' style="' +
             'color:#38d98a;' +
             'font-weight:800">' +
-            '● 等待／比對發牌事件' +
+            '● 錄製中' +
             '</div>' +
 
-            '<div id="road-ai-event-status"' +
-            ' style="margin-top:4px"></div>' +
+            '<div id="road-ai-rec-info"' +
+            ' style="margin-top:3px"></div>' +
+
+            '<div id="road-ai-rec-last"' +
+            ' style="' +
+            'margin-top:2px;' +
+            'color:#91a0bd">' +
+            '等待封包…' +
+            '</div>' +
 
             '<div style="' +
-            'margin-top:3px;' +
-            'color:#91a0bd">' +
-            '重點：57B / 83B / 89B / 109B / 112B' +
-            '</div>' +
+            'display:flex;' +
+            'gap:6px;' +
+            'margin-top:7px">' +
 
-            '<div id="road-ai-event-log"></div>';
+            '<button id="road-ai-rec-clear"' +
+            ' style="' +
+            'flex:1;' +
+            'border:1px solid #65738e;' +
+            'border-radius:7px;' +
+            'padding:7px 3px;' +
+            'background:#182237;' +
+            'color:#fff;' +
+            'font-weight:800">' +
+            '🗑 清空' +
+            '</button>' +
+
+            '<button id="road-ai-rec-copy"' +
+            ' style="' +
+            'flex:1.3;' +
+            'border:1px solid #f2c66d;' +
+            'border-radius:7px;' +
+            'padding:7px 3px;' +
+            'background:#493817;' +
+            'color:#ffd978;' +
+            'font-weight:900">' +
+            '📋 複製本局' +
+            '</button>' +
+
+            '</div>';
 
         (
             document.documentElement ||
             document.body
         ).appendChild(box);
 
-        statusEl =
+        infoEl =
             box.querySelector(
-                '#road-ai-event-status'
+                '#road-ai-rec-info'
             );
 
-        logEl =
+        lastEl =
             box.querySelector(
-                '#road-ai-event-log'
+                '#road-ai-rec-last'
             );
 
-        render();
+        box.querySelector(
+            '#road-ai-rec-clear'
+        ).addEventListener(
+            'click',
+            function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                clearRecord();
+            }
+        );
+
+        box.querySelector(
+            '#road-ai-rec-copy'
+        ).addEventListener(
+            'click',
+            function (e) {
+                e.preventDefault();
+                e.stopPropagation();
+                copyRecord();
+            }
+        );
+
+        updateUI();
     }
 
     function waitDOM() {
