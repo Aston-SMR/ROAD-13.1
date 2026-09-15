@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ROAD AI Auto Reader Detect
+// @name         ROAD AI Auto Reader Deep Detect
 // @namespace    ROAD-AI
-// @version      0.3
-// @description  ROAD AI 真人桌資料結構偵測器｜iPhone拖曳・縮小修正版
+// @version      0.4
+// @description  ROAD AI 深層偵測｜iframe / Canvas / 歷史牌路資料
 // @match        https://new-dd-cn.20299999.com/*
 // @match        https://ew-dd-cn.20299999.com/*
 // @match        https://new-dd-cloudfront.ywjxi.com/*
@@ -13,538 +13,465 @@
 (function () {
     'use strict';
 
-    if (window.__ROAD_AI_DETECT__) return;
-    window.__ROAD_AI_DETECT__ = true;
+    // 只在最外層頁面顯示一個偵測器
+    if (window.top !== window) return;
 
-    const POS_KEY = 'ROAD_AI_DETECT_POS_V03';
-
-    let minimized = false;
-    let dragging = false;
-    let moved = false;
-
-    let startX = 0;
-    let startY = 0;
-    let startLeft = 0;
-    let startTop = 0;
+    if (window.__ROAD_AI_DEEP_DETECT__) return;
+    window.__ROAD_AI_DEEP_DETECT__ = true;
 
     const box = document.createElement('div');
-    box.id = 'road-ai-detect-box';
 
     Object.assign(box.style, {
         position: 'fixed',
-        top: '70px',
-        right: '8px',
-        width: '210px',
-        maxHeight: '45vh',
-        overflow: 'hidden',
+        left: '4px',
+        bottom: '4px',
+        width: '235px',
+        maxHeight: '38vh',
+        overflow: 'auto',
         zIndex: '2147483647',
-        background: 'rgba(5,12,25,.96)',
+        background: 'rgba(5,12,25,.95)',
         color: '#fff',
         border: '2px solid #f2c66d',
-        borderRadius: '12px',
-        fontSize: '11px',
-        lineHeight: '1.45',
+        borderRadius: '9px',
+        padding: '7px',
+        fontSize: '10px',
+        lineHeight: '1.35',
         fontFamily: '-apple-system,BlinkMacSystemFont,sans-serif',
-        boxShadow: '0 4px 18px rgba(0,0,0,.45)',
-        pointerEvents: 'auto',
-        userSelect: 'none',
-        WebkitUserSelect: 'none'
+
+        // 這版純顯示，不吃手指操作
+        pointerEvents: 'none'
     });
-
-    const header = document.createElement('div');
-
-    Object.assign(header.style, {
-        height: '36px',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '0 8px',
-        background: 'rgba(15,27,48,.98)',
-        borderRadius: '10px 10px 0 0'
-    });
-
-    // 只有這個區域負責拖曳
-    const dragHandle = document.createElement('div');
-
-    dragHandle.innerHTML =
-        '<b style="font-size:13px;color:#f2c66d">' +
-        'ROAD AI Auto Reader' +
-        '</b>';
-
-    Object.assign(dragHandle.style, {
-        flex: '1',
-        height: '36px',
-        display: 'flex',
-        alignItems: 'center',
-        cursor: 'move',
-        touchAction: 'none'
-    });
-
-    // 縮小按鈕
-    const miniButton = document.createElement('button');
-    miniButton.type = 'button';
-    miniButton.textContent = '−';
-
-    Object.assign(miniButton.style, {
-        width: '30px',
-        height: '30px',
-        padding: '0',
-        margin: '0',
-        border: '1px solid #66728b',
-        borderRadius: '8px',
-        background: '#17233a',
-        color: '#fff',
-        fontSize: '21px',
-        fontWeight: '900',
-        lineHeight: '25px',
-        position: 'relative',
-        zIndex: '10',
-        pointerEvents: 'auto',
-        touchAction: 'manipulation'
-    });
-
-    const content = document.createElement('div');
-
-    Object.assign(content.style, {
-        padding: '0 8px 8px 8px',
-        maxHeight: 'calc(45vh - 36px)',
-        overflow: 'auto',
-        WebkitOverflowScrolling: 'touch'
-    });
-
-    // 縮小後使用的 AI 按鈕
-    const bubble = document.createElement('div');
-    bubble.textContent = 'AI';
-
-    Object.assign(bubble.style, {
-        display: 'none',
-        width: '46px',
-        height: '46px',
-        alignItems: 'center',
-        justifyContent: 'center',
-        color: '#f2c66d',
-        fontSize: '14px',
-        fontWeight: '900',
-        borderRadius: '50%',
-        background: 'rgba(5,12,25,.98)',
-        cursor: 'move',
-        touchAction: 'none'
-    });
-
-    header.appendChild(dragHandle);
-    header.appendChild(miniButton);
-
-    box.appendChild(header);
-    box.appendChild(content);
-    box.appendChild(bubble);
 
     document.documentElement.appendChild(box);
 
-    function safeText() {
-        try {
-            return (document.body && document.body.innerText) || '';
-        } catch (e) {
-            return '';
-        }
+    function esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;');
     }
 
-    function count(selector) {
-        try {
-            return document.querySelectorAll(selector).length;
-        } catch (e) {
-            return 0;
+    function short(s, n) {
+        s = String(s || '').replace(/\s+/g, ' ').trim();
+
+        if (s.length > n) {
+            return s.slice(0, n) + '…';
         }
+
+        return s;
     }
 
-    function detect() {
-        if (minimized) return;
+    function inspectDocument(doc, label, depth) {
 
-        const text = safeText();
-
-        const canvases = count('canvas');
-        const iframes = count('iframe');
-        const images = count('img');
-        const videos = count('video');
-
-        const hasPlayer = /PLAYER|閒|闲/i.test(text);
-        const hasBanker = /BANKER|莊|庄/i.test(text);
-        const hasTie = /TIE|和/i.test(text);
-
-        const cardWords =
-            text.match(
-                /(?:^|\s)(?:A|[2-9]|10|J|Q|K)(?:\s|$)/gi
-            ) || [];
-
-        const iframeInfo = [];
+        const result = {
+            label: label,
+            depth: depth,
+            accessible: true,
+            url: '',
+            textLength: 0,
+            textSample: '',
+            canvas: [],
+            iframeCount: 0,
+            imgCount: 0,
+            videoCount: 0,
+            svgCount: 0,
+            buttonCount: 0,
+            candidateAttrs: [],
+            children: []
+        };
 
         try {
-            document.querySelectorAll('iframe').forEach((f, i) => {
-                let src = '';
+            result.url =
+                (doc.location && doc.location.href) || '';
+        } catch (e) {
+            result.url = '(URL blocked)';
+        }
 
-                try {
-                    src = f.src || '(no src)';
-                } catch (e) {
-                    src = '(blocked)';
-                }
+        try {
+            const text =
+                (doc.body && doc.body.innerText) || '';
 
-                iframeInfo.push(
-                    '#' + (i + 1) + ' ' + src.slice(0, 80)
-                );
+            result.textLength = text.length;
+            result.textSample = short(text, 180);
+        } catch (e) {}
+
+        try {
+            doc.querySelectorAll('canvas').forEach((c, i) => {
+
+                const rect = c.getBoundingClientRect();
+
+                result.canvas.push({
+                    no: i + 1,
+                    width: c.width || 0,
+                    height: c.height || 0,
+                    cssWidth: Math.round(rect.width || 0),
+                    cssHeight: Math.round(rect.height || 0),
+                    id: c.id || '',
+                    cls:
+                        typeof c.className === 'string'
+                            ? c.className
+                            : ''
+                });
             });
         } catch (e) {}
 
-        content.innerHTML =
-            '<div style="color:#38d98a;font-weight:800;padding-top:4px">' +
-            '● 偵測中' +
-            '</div>' +
-
-            '<hr style="border:0;border-top:1px solid #33405c">' +
-
-            '<div>網域：' + location.hostname + '</div>' +
-
-            '<div>Canvas：<b>' + canvases + '</b></div>' +
-
-            '<div>iframe：<b>' + iframes + '</b></div>' +
-
-            '<div>圖片 IMG：<b>' + images + '</b></div>' +
-
-            '<div>Video：<b>' + videos + '</b></div>' +
-
-            '<div>PLAYER/閒文字：<b>' +
-            (hasPlayer ? '找到' : '沒有') +
-            '</b></div>' +
-
-            '<div>BANKER/莊文字：<b>' +
-            (hasBanker ? '找到' : '沒有') +
-            '</b></div>' +
-
-            '<div>和/TIE文字：<b>' +
-            (hasTie ? '找到' : '沒有') +
-            '</b></div>' +
-
-            '<div>疑似牌值文字：<b>' +
-            cardWords.length +
-            '</b></div>' +
-
-            '<div style="margin-top:5px;color:#91a0bd">' +
-            'DOM文字長度：' +
-            text.length +
-            '</div>' +
-
-            (
-                iframeInfo.length
-                    ? '<div style="margin-top:5px;color:#91a0bd">' +
-                      'iframe：<br>' +
-                      iframeInfo.join('<br>') +
-                      '</div>'
-                    : ''
-            );
-    }
-
-    function savePosition() {
         try {
-            const r = box.getBoundingClientRect();
+            result.iframeCount =
+                doc.querySelectorAll('iframe').length;
 
-            localStorage.setItem(
-                POS_KEY,
-                JSON.stringify({
-                    left: r.left,
-                    top: r.top
-                })
-            );
+            result.imgCount =
+                doc.querySelectorAll('img').length;
+
+            result.videoCount =
+                doc.querySelectorAll('video').length;
+
+            result.svgCount =
+                doc.querySelectorAll('svg').length;
+
+            result.buttonCount =
+                doc.querySelectorAll(
+                    'button,[role="button"]'
+                ).length;
         } catch (e) {}
-    }
 
-    function restorePosition() {
+        /*
+         * 找可能藏資料的 DOM 屬性。
+         * 只列少量結果，避免偵測框爆掉。
+         */
         try {
-            const raw = localStorage.getItem(POS_KEY);
-            if (!raw) return;
+            const nodes =
+                doc.querySelectorAll(
+                    '[aria-label],[title],[data-result],' +
+                    '[data-value],[data-card],[data-road],' +
+                    '[data-type],[data-name],[class],[id]'
+                );
 
-            const p = JSON.parse(raw);
+            for (
+                let i = 0;
+                i < nodes.length &&
+                result.candidateAttrs.length < 20;
+                i++
+            ) {
+                const el = nodes[i];
 
-            if (
-                typeof p.left !== 'number' ||
-                typeof p.top !== 'number'
-            ) return;
+                const bits = [];
 
-            box.style.right = 'auto';
+                [
+                    'aria-label',
+                    'title',
+                    'data-result',
+                    'data-value',
+                    'data-card',
+                    'data-road',
+                    'data-type',
+                    'data-name'
+                ].forEach(function (name) {
 
-            box.style.left =
-                Math.max(
-                    0,
-                    Math.min(p.left, window.innerWidth - 50)
-                ) + 'px';
+                    const v = el.getAttribute(name);
 
-            box.style.top =
-                Math.max(
-                    0,
-                    Math.min(p.top, window.innerHeight - 50)
-                ) + 'px';
+                    if (v) {
+                        bits.push(
+                            name + '=' + short(v, 40)
+                        );
+                    }
+                });
 
-        } catch (e) {}
-    }
+                const id = el.id || '';
 
-    function setMinimized(value) {
-        minimized = value;
+                const cls =
+                    typeof el.className === 'string'
+                        ? el.className
+                        : '';
 
-        if (minimized) {
+                const combined =
+                    (
+                        bits.join(' ') +
+                        ' ' +
+                        id +
+                        ' ' +
+                        cls
+                    ).toLowerCase();
 
-            header.style.display = 'none';
-            content.style.display = 'none';
-            bubble.style.display = 'flex';
-
-            box.style.width = '46px';
-            box.style.height = '46px';
-            box.style.borderRadius = '50%';
-            box.style.overflow = 'visible';
-
-        } else {
-
-            bubble.style.display = 'none';
-            header.style.display = 'flex';
-            content.style.display = 'block';
-
-            box.style.width = '210px';
-            box.style.height = 'auto';
-            box.style.borderRadius = '12px';
-            box.style.overflow = 'hidden';
-
-            detect();
-        }
-    }
-
-    // iPhone：直接在 touchend 執行縮小
-    miniButton.addEventListener(
-        'touchstart',
-        function (e) {
-            e.stopPropagation();
-        },
-        { passive: true }
-    );
-
-    miniButton.addEventListener(
-        'touchend',
-        function (e) {
-            e.stopPropagation();
-
-            if (e.cancelable) {
-                e.preventDefault();
-            }
-
-            setMinimized(true);
-        },
-        { passive: false }
-    );
-
-    // 電腦滑鼠
-    miniButton.addEventListener('click', function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-
-        setMinimized(true);
-    });
-
-    function dragStart(x, y) {
-        dragging = true;
-        moved = false;
-
-        const rect = box.getBoundingClientRect();
-
-        box.style.right = 'auto';
-        box.style.left = rect.left + 'px';
-        box.style.top = rect.top + 'px';
-
-        startX = x;
-        startY = y;
-
-        startLeft = rect.left;
-        startTop = rect.top;
-    }
-
-    function dragMove(x, y) {
-        if (!dragging) return;
-
-        const dx = x - startX;
-        const dy = y - startY;
-
-        if (
-            Math.abs(dx) > 5 ||
-            Math.abs(dy) > 5
-        ) {
-            moved = true;
-        }
-
-        let left = startLeft + dx;
-        let top = startTop + dy;
-
-        const rect = box.getBoundingClientRect();
-
-        const maxLeft =
-            Math.max(
-                0,
-                window.innerWidth - rect.width
-            );
-
-        const maxTop =
-            Math.max(
-                0,
-                window.innerHeight - rect.height
-            );
-
-        left =
-            Math.max(
-                0,
-                Math.min(left, maxLeft)
-            );
-
-        top =
-            Math.max(
-                0,
-                Math.min(top, maxTop)
-            );
-
-        box.style.left = left + 'px';
-        box.style.top = top + 'px';
-    }
-
-    function dragEnd() {
-        if (!dragging) return;
-
-        dragging = false;
-        savePosition();
-    }
-
-    function addTouchDrag(el, bubbleMode) {
-
-        el.addEventListener(
-            'touchstart',
-            function (e) {
-
-                if (!e.touches || !e.touches.length) return;
-
-                const t = e.touches[0];
-
-                dragStart(t.clientX, t.clientY);
-
-            },
-            { passive: true }
-        );
-
-        el.addEventListener(
-            'touchmove',
-            function (e) {
-
-                if (!dragging) return;
-                if (!e.touches || !e.touches.length) return;
-
-                const t = e.touches[0];
-
-                dragMove(t.clientX, t.clientY);
-
-                if (e.cancelable) {
-                    e.preventDefault();
-                }
-
-            },
-            { passive: false }
-        );
-
-        el.addEventListener(
-            'touchend',
-            function (e) {
-
-                const wasMoved = moved;
-
-                dragEnd();
-
+                /*
+                 * 優先保留看起來跟百家樂資料有關的名稱
+                 */
                 if (
-                    bubbleMode &&
-                    !wasMoved
+                    /player|banker|tie|road|bead|result|history|card|poker|baccarat|game|閒|莊|和/i
+                        .test(combined)
                 ) {
-                    if (e.cancelable) {
-                        e.preventDefault();
+                    result.candidateAttrs.push(
+                        short(
+                            el.tagName +
+                            (id ? '#' + id : '') +
+                            (cls
+                                ? '.' +
+                                  cls
+                                      .trim()
+                                      .replace(/\s+/g, '.')
+                                : '') +
+                            (bits.length
+                                ? ' [' +
+                                  bits.join(' ') +
+                                  ']'
+                                : ''),
+                            150
+                        )
+                    );
+                }
+            }
+        } catch (e) {}
+
+        /*
+         * 深入 iframe。
+         * 最多兩層，避免無限遞迴。
+         */
+        if (depth < 2) {
+
+            try {
+                const frames =
+                    doc.querySelectorAll('iframe');
+
+                frames.forEach(function (f, index) {
+
+                    const childLabel =
+                        label +
+                        ' > iframe#' +
+                        (index + 1);
+
+                    let childDoc = null;
+                    let childURL = '';
+
+                    try {
+                        childURL =
+                            f.src ||
+                            f.getAttribute('src') ||
+                            '(no src)';
+                    } catch (e) {
+                        childURL = '(src blocked)';
                     }
 
-                    setMinimized(false);
-                }
+                    try {
+                        childDoc =
+                            f.contentDocument ||
+                            (
+                                f.contentWindow &&
+                                f.contentWindow.document
+                            );
 
-            },
-            { passive: false }
-        );
+                        /*
+                         * 強制碰一下 body，
+                         * 如果跨網域會在這裡丟錯。
+                         */
+                        if (childDoc) {
+                            void childDoc.body;
+                        }
+
+                    } catch (e) {
+                        childDoc = null;
+                    }
+
+                    if (childDoc) {
+
+                        result.children.push(
+                            inspectDocument(
+                                childDoc,
+                                childLabel,
+                                depth + 1
+                            )
+                        );
+
+                    } else {
+
+                        result.children.push({
+                            label: childLabel,
+                            depth: depth + 1,
+                            accessible: false,
+                            url: childURL,
+                            textLength: 0,
+                            textSample: '',
+                            canvas: [],
+                            iframeCount: 0,
+                            imgCount: 0,
+                            videoCount: 0,
+                            svgCount: 0,
+                            buttonCount: 0,
+                            candidateAttrs: [],
+                            children: []
+                        });
+                    }
+                });
+
+            } catch (e) {}
+        }
+
+        return result;
     }
 
-    addTouchDrag(dragHandle, false);
-    addTouchDrag(bubble, true);
+    function renderNode(node) {
 
-    // 電腦滑鼠拖曳
-    dragHandle.addEventListener(
-        'mousedown',
-        function (e) {
+        let html = '';
 
-            if (e.button !== 0) return;
+        const indent =
+            node.depth * 8;
 
-            dragStart(e.clientX, e.clientY);
-            e.preventDefault();
-        }
-    );
+        html +=
+            '<div style="' +
+            'margin-left:' + indent + 'px;' +
+            'margin-top:6px;' +
+            'padding-top:5px;' +
+            'border-top:1px solid #33405c">' +
 
-    bubble.addEventListener(
-        'mousedown',
-        function (e) {
+            '<div style="font-weight:900;color:' +
+            (node.accessible ? '#38d98a' : '#ff7676') +
+            '">' +
+            esc(node.label) +
+            '：' +
+            (node.accessible ? '可讀' : '被阻擋') +
+            '</div>';
 
-            if (e.button !== 0) return;
+        html +=
+            '<div style="color:#91a0bd">' +
+            esc(short(node.url, 100)) +
+            '</div>';
 
-            dragStart(e.clientX, e.clientY);
-            e.preventDefault();
-        }
-    );
+        if (node.accessible) {
 
-    document.addEventListener(
-        'mousemove',
-        function (e) {
-            if (!dragging) return;
+            html +=
+                '<div>' +
+                '文字：<b>' +
+                node.textLength +
+                '</b>　' +
+                'Canvas：<b>' +
+                node.canvas.length +
+                '</b>　' +
+                'iframe：<b>' +
+                node.iframeCount +
+                '</b>' +
+                '</div>';
 
-            dragMove(e.clientX, e.clientY);
-        }
-    );
+            html +=
+                '<div>' +
+                'IMG：' +
+                node.imgCount +
+                '　Video：' +
+                node.videoCount +
+                '　SVG：' +
+                node.svgCount +
+                '　Button：' +
+                node.buttonCount +
+                '</div>';
 
-    document.addEventListener(
-        'mouseup',
-        function () {
-            dragEnd();
-        }
-    );
+            if (node.textSample) {
 
-    bubble.addEventListener(
-        'click',
-        function () {
-
-            if (!moved) {
-                setMinimized(false);
+                html +=
+                    '<div style="margin-top:3px;color:#c2cad8">' +
+                    '文字樣本：' +
+                    esc(node.textSample) +
+                    '</div>';
             }
 
-            moved = false;
-        }
-    );
+            if (node.canvas.length) {
 
-    restorePosition();
+                html +=
+                    '<div style="margin-top:3px;color:#f2c66d">' +
+                    'Canvas 尺寸：<br>';
+
+                node.canvas
+                    .slice(0, 8)
+                    .forEach(function (c) {
+
+                        html +=
+                            '#' +
+                            c.no +
+                            ' ' +
+                            c.width +
+                            '×' +
+                            c.height +
+                            ' / CSS ' +
+                            c.cssWidth +
+                            '×' +
+                            c.cssHeight;
+
+                        if (c.id) {
+                            html +=
+                                ' id=' +
+                                esc(short(c.id, 25));
+                        }
+
+                        if (c.cls) {
+                            html +=
+                                ' class=' +
+                                esc(short(c.cls, 35));
+                        }
+
+                        html += '<br>';
+                    });
+
+                html += '</div>';
+            }
+
+            if (node.candidateAttrs.length) {
+
+                html +=
+                    '<div style="margin-top:4px;color:#79b9ff">' +
+                    '疑似資料節點：<br>' +
+                    node.candidateAttrs
+                        .map(esc)
+                        .join('<br>') +
+                    '</div>';
+            }
+        }
+
+        html += '</div>';
+
+        (node.children || []).forEach(function (child) {
+            html += renderNode(child);
+        });
+
+        return html;
+    }
+
+    function detect() {
+
+        let tree;
+
+        try {
+            tree =
+                inspectDocument(
+                    document,
+                    'TOP',
+                    0
+                );
+        } catch (e) {
+
+            box.innerHTML =
+                '<b style="color:#ff7676">' +
+                '偵測錯誤：' +
+                esc(e.message || e) +
+                '</b>';
+
+            return;
+        }
+
+        box.innerHTML =
+            '<div style="font-size:12px;font-weight:900;color:#f2c66d">' +
+            'ROAD AI 深層偵測 V0.4' +
+            '</div>' +
+
+            '<div style="color:#38d98a;font-weight:800">' +
+            '● 正在找歷史 P/B/T 資料' +
+            '</div>' +
+
+            renderNode(tree);
+    }
+
     detect();
 
-    setInterval(detect, 1000);
-
-    const observer = new MutationObserver(function () {
-        detect();
-    });
-
-    try {
-        observer.observe(
-            document.documentElement,
-            {
-                childList: true,
-                subtree: true,
-                attributes: false
-            }
-        );
-    } catch (e) {}
+    /*
+     * 2 秒更新一次就夠。
+     * 不用 MutationObserver，
+     * 避免真人桌大量動畫造成偵測器狂跑。
+     */
+    setInterval(detect, 2000);
 
 })();
