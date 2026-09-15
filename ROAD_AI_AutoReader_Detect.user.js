@@ -1,45 +1,45 @@
 // ==UserScript==
-// @name         ROAD AI Auto Reader Data Detect
+// @name         ROAD AI Live Card Detect
 // @namespace    ROAD-AI
-// @version      0.5
-// @description  ROAD AI 歷史P/B/T資料探測器
+// @version      0.6
+// @description  ROAD AI 即時牌面資料偵測器｜WebSocket Fetch XHR
 // @match        https://new-dd-cn.20299999.com/*
 // @match        https://ew-dd-cn.20299999.com/*
 // @match        https://new-dd-cloudfront.ywjxi.com/*
 // @match        https://new-dd-cn.ahsy114.com/*
-// @run-at       document-idle
+// @run-at       document-start
 // @grant        none
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    if (window.top !== window) return;
-    if (window.__ROAD_AI_DATA_DETECT__) return;
-    window.__ROAD_AI_DATA_DETECT__ = true;
+    if (window.__ROAD_AI_LIVE_DETECT__) return;
+    window.__ROAD_AI_LIVE_DETECT__ = true;
 
-    const box = document.createElement('div');
+    const MAX_LOG = 25;
+    const logs = [];
 
-    Object.assign(box.style, {
-        position: 'fixed',
-        left: '4px',
-        bottom: '4px',
-        width: '250px',
-        maxHeight: '42vh',
-        overflow: 'auto',
-        zIndex: '2147483647',
-        background: 'rgba(5,12,25,.96)',
-        color: '#fff',
-        border: '2px solid #f2c66d',
-        borderRadius: '9px',
-        padding: '7px',
-        fontSize: '10px',
-        lineHeight: '1.35',
-        fontFamily: '-apple-system,BlinkMacSystemFont,sans-serif',
-        pointerEvents: 'none'
-    });
+    let wsCount = 0;
+    let fetchCount = 0;
+    let xhrCount = 0;
+    let candidateCount = 0;
 
-    document.documentElement.appendChild(box);
+    let box = null;
+    let logBox = null;
+    let statusBox = null;
+
+    function nowTime() {
+        const d = new Date();
+
+        return (
+            String(d.getHours()).padStart(2, '0') +
+            ':' +
+            String(d.getMinutes()).padStart(2, '0') +
+            ':' +
+            String(d.getSeconds()).padStart(2, '0')
+        );
+    }
 
     function esc(v) {
         return String(v == null ? '' : v)
@@ -48,301 +48,412 @@
             .replace(/>/g, '&gt;');
     }
 
+    function clean(v) {
+        return String(v == null ? '' : v)
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
     function short(v, n) {
-        let s = '';
-
-        try {
-            s = typeof v === 'string'
-                ? v
-                : JSON.stringify(v);
-        } catch (e) {
-            s = String(v);
-        }
-
-        s = s.replace(/\s+/g, ' ');
+        const s = clean(v);
 
         return s.length > n
             ? s.slice(0, n) + '…'
             : s;
     }
 
-    function interestingName(name) {
-        return /road|result|history|record|game|baccarat|banker|player|tie|shoe|bead|bigroad|bigeye|smallroad|cockroach|dragon|winner|round/i
-            .test(name);
-    }
+    /*
+     * 只挑看起來可能與百家樂、
+     * 牌值、勝負、局號有關的資料。
+     */
+    function looksInteresting(text) {
+        if (!text) return false;
 
-    function interestingValue(value) {
-        let s = '';
-
-        try {
-            s = typeof value === 'string'
-                ? value
-                : JSON.stringify(value);
-        } catch (e) {
-            return false;
-        }
-
-        if (!s) return false;
+        const s = String(text);
 
         return (
-            /banker|player|tie|baccarat|bigroad|bigeye|smallroad|winner/i.test(s) ||
-            /["']?[PBT]["']?/i.test(s)
+            /banker|player|tie|winner|result|card|cards|poker|baccarat|round|shoe|gameNo|tableNo|閒|闲|莊|庄|和/i.test(s) ||
+
+            /"(?:A|[2-9]|10|J|Q|K)"/i.test(s) ||
+
+            /(?:^|[^A-Z0-9])(?:A|10|J|Q|K)(?:[^A-Z0-9]|$)/i.test(s)
         );
     }
 
-    function scanStorage(storage, label) {
-        const hits = [];
+    function updateStatus() {
+        if (!statusBox) return;
 
-        try {
-            for (let i = 0; i < storage.length; i++) {
-                const key = storage.key(i);
-                const value = storage.getItem(key);
-
-                if (
-                    interestingName(key || '') ||
-                    interestingValue(value)
-                ) {
-                    hits.push({
-                        source: label,
-                        name: key || '',
-                        value: short(value, 350)
-                    });
-                }
-
-                if (hits.length >= 20) break;
-            }
-        } catch (e) {}
-
-        return hits;
+        statusBox.innerHTML =
+            'WS：<b>' + wsCount + '</b>　' +
+            'Fetch：<b>' + fetchCount + '</b>　' +
+            'XHR：<b>' + xhrCount + '</b><br>' +
+            '疑似牌局資料：<b style="color:#f2c66d">' +
+            candidateCount +
+            '</b>';
     }
 
-    function scanWindow() {
-        const hits = [];
-        let names = [];
+    function renderLogs() {
+        if (!logBox) return;
+
+        if (!logs.length) {
+            logBox.innerHTML =
+                '<div style="color:#91a0bd;margin-top:6px">' +
+                '等待新一局資料…' +
+                '</div>';
+
+            return;
+        }
+
+        logBox.innerHTML = logs
+            .map(function (x) {
+
+                return (
+                    '<div style="' +
+                    'margin-top:5px;' +
+                    'padding-top:4px;' +
+                    'border-top:1px solid #33405c">' +
+
+                    '<b style="color:#79b9ff">' +
+                    esc(x.type) +
+                    '</b> ' +
+
+                    '<span style="color:#91a0bd">' +
+                    esc(x.time) +
+                    '</span>' +
+
+                    '<div style="' +
+                    'color:#fff;' +
+                    'word-break:break-all">' +
+                    esc(x.text) +
+                    '</div>' +
+
+                    '</div>'
+                );
+            })
+            .join('');
+    }
+
+    function addCandidate(type, data) {
+        let text = '';
 
         try {
-            names = Object.getOwnPropertyNames(window);
+            if (typeof data === 'string') {
+                text = data;
+            } else if (data instanceof ArrayBuffer) {
+                text = '[ArrayBuffer ' + data.byteLength + ' bytes]';
+            } else if (ArrayBuffer.isView(data)) {
+                text =
+                    '[Binary ' +
+                    data.byteLength +
+                    ' bytes]';
+            } else {
+                text = JSON.stringify(data);
+            }
         } catch (e) {
-            return hits;
+            text = String(data);
         }
 
-        for (let i = 0; i < names.length; i++) {
-            const name = names[i];
+        if (!text) return;
 
-            if (!interestingName(name)) continue;
+        /*
+         * Binary 先記錄存在，
+         * 但不假裝已經能解讀。
+         */
+        const binary =
+            /^\[(?:ArrayBuffer|Binary)/.test(text);
 
-            let value;
-
-            try {
-                value = window[name];
-            } catch (e) {
-                continue;
-            }
-
-            const type = typeof value;
-
-            if (
-                type === 'function' ||
-                type === 'undefined'
-            ) {
-                continue;
-            }
-
-            let preview = '';
-
-            try {
-                preview = short(value, 350);
-            } catch (e) {
-                continue;
-            }
-
-            hits.push({
-                source: 'WINDOW',
-                name: name,
-                value: preview
-            });
-
-            if (hits.length >= 30) break;
+        if (
+            !binary &&
+            !looksInteresting(text)
+        ) {
+            return;
         }
 
-        return hits;
+        candidateCount++;
+
+        logs.unshift({
+            type: type,
+            time: nowTime(),
+            text: short(text, 600)
+        });
+
+        if (logs.length > MAX_LOG) {
+            logs.length = MAX_LOG;
+        }
+
+        updateStatus();
+        renderLogs();
     }
 
-    function scanScripts() {
-        const hits = [];
+    /*
+     * WebSocket
+     */
+    try {
+        const NativeWebSocket = window.WebSocket;
 
-        try {
-            const scripts =
-                document.querySelectorAll('script');
+        if (NativeWebSocket) {
 
-            scripts.forEach(function (s, i) {
-                const text = s.textContent || '';
+            const WrappedWebSocket = function () {
+                const ws =
+                    Reflect.construct(
+                        NativeWebSocket,
+                        arguments,
+                        new.target || WrappedWebSocket
+                    );
 
-                if (!text) return;
+                wsCount++;
+                updateStatus();
 
-                if (
-                    /banker|player|tie|bigroad|bigeye|smallroad|baccarat|gameResult|roadData|history/i
-                        .test(text)
-                ) {
-                    hits.push({
-                        source: 'SCRIPT',
-                        name: '#' + (i + 1),
-                        value: short(text, 350)
-                    });
-                }
-            });
-        } catch (e) {}
+                try {
+                    ws.addEventListener(
+                        'message',
+                        function (event) {
+                            addCandidate(
+                                'WS IN',
+                                event.data
+                            );
+                        }
+                    );
+                } catch (e) {}
 
-        return hits.slice(0, 10);
-    }
+                try {
+                    const nativeSend =
+                        ws.send;
 
-    function findArrays() {
-        const hits = [];
-        let names = [];
+                    ws.send = function (data) {
+                        addCandidate(
+                            'WS OUT',
+                            data
+                        );
 
-        try {
-            names = Object.getOwnPropertyNames(window);
-        } catch (e) {
-            return hits;
-        }
+                        return nativeSend.apply(
+                            this,
+                            arguments
+                        );
+                    };
+                } catch (e) {}
 
-        for (let i = 0; i < names.length; i++) {
-            const name = names[i];
+                return ws;
+            };
 
-            let value;
+            WrappedWebSocket.prototype =
+                NativeWebSocket.prototype;
 
             try {
-                value = window[name];
-            } catch (e) {
-                continue;
-            }
+                Object.defineProperties(
+                    WrappedWebSocket,
+                    {
+                        CONNECTING: {
+                            value: NativeWebSocket.CONNECTING
+                        },
+                        OPEN: {
+                            value: NativeWebSocket.OPEN
+                        },
+                        CLOSING: {
+                            value: NativeWebSocket.CLOSING
+                        },
+                        CLOSED: {
+                            value: NativeWebSocket.CLOSED
+                        }
+                    }
+                );
+            } catch (e) {}
 
-            if (!Array.isArray(value)) continue;
-
-            if (value.length < 3) continue;
-
-            const preview = short(value, 500);
-
-            if (
-                interestingName(name) ||
-                interestingValue(preview)
-            ) {
-                hits.push({
-                    source: 'ARRAY',
-                    name:
-                        name +
-                        ' [' +
-                        value.length +
-                        ']',
-                    value: preview
-                });
-            }
-
-            if (hits.length >= 20) break;
+            window.WebSocket =
+                WrappedWebSocket;
         }
+    } catch (e) {}
 
-        return hits;
-    }
+    /*
+     * fetch
+     */
+    try {
+        const nativeFetch = window.fetch;
 
-    function renderHit(h) {
-        return (
-            '<div style="margin-top:5px;' +
-            'padding-top:4px;' +
-            'border-top:1px solid #33405c">' +
+        if (nativeFetch) {
 
-            '<b style="color:#79b9ff">' +
-            esc(h.source) +
-            '</b> ' +
+            window.fetch = function () {
+                fetchCount++;
+                updateStatus();
 
-            '<b style="color:#f2c66d">' +
-            esc(h.name) +
-            '</b>' +
+                const p =
+                    nativeFetch.apply(
+                        this,
+                        arguments
+                    );
 
-            '<div style="color:#c5ccda;' +
-            'word-break:break-all">' +
-            esc(h.value) +
-            '</div>' +
+                try {
+                    p.then(function (response) {
 
-            '</div>'
+                        try {
+                            const clone =
+                                response.clone();
+
+                            clone.text()
+                                .then(function (text) {
+                                    addCandidate(
+                                        'FETCH',
+                                        text
+                                    );
+                                })
+                                .catch(function () {});
+                        } catch (e) {}
+
+                    }).catch(function () {});
+                } catch (e) {}
+
+                return p;
+            };
+        }
+    } catch (e) {}
+
+    /*
+     * XMLHttpRequest
+     */
+    try {
+        const nativeOpen =
+            XMLHttpRequest.prototype.open;
+
+        const nativeSend =
+            XMLHttpRequest.prototype.send;
+
+        XMLHttpRequest.prototype.open =
+            function (method, url) {
+
+                try {
+                    this.__roadAiUrl =
+                        String(url || '');
+                } catch (e) {}
+
+                return nativeOpen.apply(
+                    this,
+                    arguments
+                );
+            };
+
+        XMLHttpRequest.prototype.send =
+            function () {
+
+                xhrCount++;
+                updateStatus();
+
+                try {
+                    this.addEventListener(
+                        'load',
+                        function () {
+
+                            let data = '';
+
+                            try {
+                                if (
+                                    typeof this.responseText ===
+                                    'string'
+                                ) {
+                                    data =
+                                        this.responseText;
+                                }
+                            } catch (e) {}
+
+                            if (data) {
+                                addCandidate(
+                                    'XHR',
+                                    data
+                                );
+                            }
+                        }
+                    );
+                } catch (e) {}
+
+                return nativeSend.apply(
+                    this,
+                    arguments
+                );
+            };
+    } catch (e) {}
+
+    function createUI() {
+        if (box) return;
+
+        box =
+            document.createElement('div');
+
+        Object.assign(
+            box.style,
+            {
+                position: 'fixed',
+                left: '4px',
+                bottom: '4px',
+                width: '255px',
+                maxHeight: '38vh',
+                overflow: 'auto',
+                zIndex: '2147483647',
+                background:
+                    'rgba(5,12,25,.96)',
+                color: '#fff',
+                border:
+                    '2px solid #f2c66d',
+                borderRadius: '9px',
+                padding: '7px',
+                fontSize: '10px',
+                lineHeight: '1.35',
+                fontFamily:
+                    '-apple-system,BlinkMacSystemFont,sans-serif',
+                pointerEvents: 'none'
+            }
         );
-    }
 
-    function detect() {
-        const storageHits = [
-            ...scanStorage(
-                window.localStorage,
-                'LOCAL'
-            ),
-            ...scanStorage(
-                window.sessionStorage,
-                'SESSION'
-            )
-        ];
-
-        const windowHits = scanWindow();
-        const arrayHits = findArrays();
-        const scriptHits = scanScripts();
-
-        const all = [
-            ...storageHits,
-            ...arrayHits,
-            ...windowHits,
-            ...scriptHits
-        ];
-
-        let html =
-            '<div style="font-size:12px;' +
+        box.innerHTML =
+            '<div style="' +
+            'font-size:12px;' +
             'font-weight:900;' +
             'color:#f2c66d">' +
-            'ROAD AI 資料探測 V0.5' +
+            'ROAD AI 即時牌面 V0.6' +
             '</div>' +
 
-            '<div style="color:#38d98a;' +
+            '<div style="' +
+            'color:#38d98a;' +
             'font-weight:800">' +
-            '● 搜尋歷史 P/B/T' +
+            '● 等待新局資料' +
             '</div>' +
 
-            '<div style="margin-top:4px">' +
-            '網域：' +
-            esc(location.hostname) +
-            '</div>' +
+            '<div id="road-ai-live-status"' +
+            ' style="margin-top:4px"></div>' +
 
-            '<div>' +
-            'Storage：<b>' +
-            storageHits.length +
-            '</b>　' +
+            '<div id="road-ai-live-log"></div>';
 
-            'Array：<b>' +
-            arrayHits.length +
-            '</b>　' +
+        (
+            document.documentElement ||
+            document.body
+        ).appendChild(box);
 
-            'Window：<b>' +
-            windowHits.length +
-            '</b>　' +
+        statusBox =
+            box.querySelector(
+                '#road-ai-live-status'
+            );
 
-            'Script：<b>' +
-            scriptHits.length +
-            '</b>' +
-            '</div>';
+        logBox =
+            box.querySelector(
+                '#road-ai-live-log'
+            );
 
-        if (!all.length) {
-            html +=
-                '<div style="margin-top:8px;' +
-                'color:#ffcc73">' +
-                '目前沒有找到明顯資料' +
-                '</div>';
-        } else {
-            all
-                .slice(0, 40)
-                .forEach(function (h) {
-                    html += renderHit(h);
-                });
-        }
-
-        box.innerHTML = html;
+        updateStatus();
+        renderLogs();
     }
 
-    detect();
-    setInterval(detect, 2500);
+    function waitForDOM() {
+        if (
+            document.documentElement
+        ) {
+            createUI();
+            return;
+        }
+
+        setTimeout(
+            waitForDOM,
+            20
+        );
+    }
+
+    waitForDOM();
 
 })();
