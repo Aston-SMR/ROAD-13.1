@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ROAD AI Card Packet Locator
+// @name         ROAD AI Deal Event Locator
 // @namespace    ROAD-AI
-// @version      0.8
-// @description  ROAD AI 即時牌面｜牌值封包定位器
+// @version      0.9
+// @description  ROAD AI 發牌事件定位｜WebSocket封包變化分組
 // @match        https://new-dd-cn.20299999.com/*
 // @match        https://ew-dd-cn.20299999.com/*
 // @match        https://new-dd-cloudfront.ywjxi.com/*
@@ -14,23 +14,28 @@
 (function () {
     'use strict';
 
-    if (window.__ROAD_AI_CARD_LOCATOR__) return;
-    window.__ROAD_AI_CARD_LOCATOR__ = true;
+    if (window.__ROAD_AI_EVENT_LOCATOR__) return;
+    window.__ROAD_AI_EVENT_LOCATOR__ = true;
 
-    const MAX_LOG = 24;
+    const WATCH_SIZES = [
+        30, 34, 57, 83, 89, 109, 112
+    ];
+
+    const MAX_EVENTS = 22;
+    const MAX_DIFF = 28;
 
     let box = null;
-    let statusBox = null;
-    let logBox = null;
+    let statusEl = null;
+    let logEl = null;
 
     let wsCount = 0;
     let totalPackets = 0;
-    let shownPackets = 0;
+    let watchedPackets = 0;
 
-    const logs = [];
-    const lastBySize = new Map();
+    const events = [];
+    const lastPacketBySize = new Map();
 
-    function timeNow() {
+    function now() {
         const d = new Date();
 
         return (
@@ -41,37 +46,32 @@
         );
     }
 
-    function esc(v) {
-        return String(v == null ? '' : v)
+    function esc(value) {
+        return String(value == null ? '' : value)
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;');
     }
 
-    function hexByte(v) {
+    function hex(v) {
+        if (v === undefined) return '--';
+
         return Number(v)
             .toString(16)
             .padStart(2, '0')
             .toUpperCase();
     }
 
-    function bytesToHex(bytes, max) {
-        const len = Math.min(bytes.length, max);
-        const out = [];
-
-        for (let i = 0; i < len; i++) {
-            out.push(hexByte(bytes[i]));
-        }
-
-        return out.join(' ');
+    function cloneBytes(bytes) {
+        return new Uint8Array(bytes);
     }
 
-    function tryText(bytes) {
+    function readableText(bytes) {
         try {
-            let text =
-                new TextDecoder('utf-8', {
-                    fatal: false
-                }).decode(bytes);
+            let text = new TextDecoder(
+                'utf-8',
+                { fatal: false }
+            ).decode(bytes);
 
             text = text
                 .replace(/\u0000/g, '·')
@@ -81,151 +81,177 @@
                 )
                 .trim();
 
-            return text.length > 160
-                ? text.slice(0, 160) + '…'
-                : text;
+            if (!text) return '';
+
+            // 只保留比較有用的可讀字串
+            const useful =
+                text.match(
+                    /20\d{10,}[A-Za-z0-9]*|BANKER|PLAYER|TIE|RESULT|WINNER|CARD|ROUND|GAME/ig
+                );
+
+            if (useful && useful.length) {
+                return useful.join(' | ').slice(0, 180);
+            }
+
+            return '';
 
         } catch (e) {
             return '';
         }
     }
 
-    function textScore(text) {
-        if (!text) return 0;
-
-        let score = 0;
-
-        if (/20\d{12,}/.test(text)) score += 5;
-
-        if (
-            /player|banker|tie|card|result|winner|round|game/i
-                .test(text)
-        ) {
-            score += 5;
-        }
-
-        if (/[PBT]/.test(text)) {
-            score += 2;
-        }
-
-        return score;
-    }
-
-    function diffBytes(previous, current) {
+    function diffPacket(previous, current) {
         if (!previous) {
             return {
+                changed: [],
                 count: 0,
-                positions: []
+                first: true
             };
         }
 
-        const max =
-            Math.max(
-                previous.length,
-                current.length
-            );
+        const changed = [];
 
-        const positions = [];
+        const length = Math.max(
+            previous.length,
+            current.length
+        );
 
-        for (let i = 0; i < max; i++) {
-            const a = previous[i];
-            const b = current[i];
+        for (let i = 0; i < length; i++) {
+            const oldValue = previous[i];
+            const newValue = current[i];
 
-            if (a !== b) {
-                positions.push(
-                    i + ':' +
-                    (
-                        a === undefined
-                            ? '--'
-                            : hexByte(a)
-                    ) +
-                    '→' +
-                    (
-                        b === undefined
-                            ? '--'
-                            : hexByte(b)
-                    )
-                );
-            }
-
-            if (positions.length >= 20) {
-                break;
+            if (oldValue !== newValue) {
+                changed.push({
+                    index: i,
+                    oldValue: oldValue,
+                    newValue: newValue
+                });
             }
         }
 
         return {
-            count: positions.length,
-            positions: positions
+            changed: changed,
+            count: changed.length,
+            first: false
         };
     }
 
-    function shouldShow(bytes, text) {
-        const size = bytes.length;
+    function formatDiff(diff) {
+        if (diff.first) {
+            return '首次收到此尺寸';
+        }
 
-        /*
-         * 優先保留短封包。
-         */
-        if (size <= 140) return true;
+        if (!diff.count) {
+            return '沒有變化';
+        }
 
-        /*
-         * 或封包內有明顯可讀遊戲資訊。
-         */
-        if (textScore(text) >= 2) return true;
+        return diff.changed
+            .slice(0, MAX_DIFF)
+            .map(function (x) {
+                return (
+                    x.index +
+                    ':' +
+                    hex(x.oldValue) +
+                    '→' +
+                    hex(x.newValue)
+                );
+            })
+            .join('  ');
+    }
+
+    function classify(size, diff) {
+        if (size === 30) {
+            return '短狀態';
+        }
+
+        if (size === 34) {
+            return '局號/狀態候選';
+        }
+
+        if (size === 57) {
+            return '發牌候選 A';
+        }
+
+        if (size === 83) {
+            return '發牌候選 B';
+        }
+
+        if (size === 89) {
+            return '發牌候選 C';
+        }
+
+        if (size === 109) {
+            return '牌局資料候選';
+        }
+
+        if (size === 112) {
+            return '牌局資料候選 ★';
+        }
+
+        if (diff.count <= 6) {
+            return '少量欄位變化';
+        }
+
+        return '狀態資料';
+    }
+
+    function isWatched(size, text) {
+        if (WATCH_SIZES.includes(size)) {
+            return true;
+        }
+
+        if (text) {
+            return true;
+        }
 
         return false;
     }
 
-    function addPacket(direction, bytes) {
+    function addEvent(direction, bytes) {
         totalPackets++;
 
-        const text = tryText(bytes);
+        const size = bytes.length;
+        const text = readableText(bytes);
 
-        if (!shouldShow(bytes, text)) {
-            updateUI();
+        if (!isWatched(size, text)) {
+            render();
             return;
         }
 
-        shownPackets++;
+        watchedPackets++;
 
         const previous =
-            lastBySize.get(bytes.length);
+            lastPacketBySize.get(size);
 
         const diff =
-            diffBytes(
-                previous,
-                bytes
-            );
+            diffPacket(previous, bytes);
 
-        /*
-         * 複製一份，避免原始 buffer 後續被修改。
-         */
-        lastBySize.set(
-            bytes.length,
-            new Uint8Array(bytes)
+        lastPacketBySize.set(
+            size,
+            cloneBytes(bytes)
         );
 
-        logs.unshift({
+        events.unshift({
+            time: now(),
             direction: direction,
-            time: timeNow(),
-            size: bytes.length,
-            text: text,
-            score: textScore(text),
-            hex: bytesToHex(bytes, 140),
+            size: size,
+            label: classify(size, diff),
             diffCount: diff.count,
-            diff: diff.positions.join('  ')
+            diffText: formatDiff(diff),
+            text: text
         });
 
-        if (logs.length > MAX_LOG) {
-            logs.length = MAX_LOG;
+        if (events.length > MAX_EVENTS) {
+            events.length = MAX_EVENTS;
         }
 
-        updateUI();
+        render();
     }
 
-    async function processData(direction, data) {
+    async function handleData(direction, data) {
         try {
             if (data instanceof ArrayBuffer) {
-                addPacket(
+                addEvent(
                     direction,
                     new Uint8Array(data)
                 );
@@ -233,7 +259,7 @@
             }
 
             if (ArrayBuffer.isView(data)) {
-                addPacket(
+                addEvent(
                     direction,
                     new Uint8Array(
                         data.buffer,
@@ -251,15 +277,16 @@
                 const buffer =
                     await data.arrayBuffer();
 
-                addPacket(
+                addEvent(
                     direction,
                     new Uint8Array(buffer)
                 );
+
                 return;
             }
 
             if (typeof data === 'string') {
-                addPacket(
+                addEvent(
                     direction + ' TXT',
                     new TextEncoder().encode(data)
                 );
@@ -268,85 +295,88 @@
         } catch (e) {}
     }
 
-    function updateUI() {
-        if (!statusBox || !logBox) return;
+    function render() {
+        if (!statusEl || !logEl) return;
 
-        statusBox.innerHTML =
+        statusEl.innerHTML =
             'WS：<b>' + wsCount + '</b>　' +
             '全部：<b>' + totalPackets + '</b>　' +
-            '保留：<b style="color:#f2c66d">' +
-            shownPackets +
+            '定位：<b style="color:#f2c66d">' +
+            watchedPackets +
             '</b>';
 
-        if (!logs.length) {
-            logBox.innerHTML =
+        if (!events.length) {
+            logEl.innerHTML =
                 '<div style="margin-top:6px;color:#91a0bd">' +
-                '等待發牌封包…' +
+                '等待下一局發牌…' +
                 '</div>';
 
             return;
         }
 
-        logBox.innerHTML =
-            logs.map(function (x) {
+        logEl.innerHTML = events
+            .map(function (e) {
 
                 let html =
                     '<div style="' +
                     'margin-top:6px;' +
                     'padding-top:5px;' +
-                    'border-top:1px solid #33405c">' +
+                    'border-top:1px solid #34415a">' +
+
+                    '<div>' +
 
                     '<b style="color:#79b9ff">' +
-                    esc(x.direction) +
+                    esc(e.direction) +
                     '</b> ' +
 
                     '<span style="color:#91a0bd">' +
-                    esc(x.time) +
+                    esc(e.time) +
                     '</span> ' +
 
                     '<b style="color:#f2c66d">' +
-                    x.size +
-                    'B</b>';
+                    e.size +
+                    'B</b>' +
 
-                if (x.text) {
-                    html +=
-                        '<div style="' +
-                        'margin-top:2px;' +
-                        'color:#38d98a;' +
-                        'word-break:break-all">' +
-                        'TXT：' +
-                        esc(x.text) +
-                        '</div>';
-                }
-
-                if (x.diff) {
-                    html +=
-                        '<div style="' +
-                        'margin-top:2px;' +
-                        'color:#ffcf70;' +
-                        'word-break:break-all">' +
-                        'Δ：' +
-                        esc(x.diff) +
-                        '</div>';
-                }
-
-                html +=
-                    '<div style="' +
-                    'margin-top:2px;' +
-                    'color:#d5dbea;' +
-                    'word-break:break-all">' +
-                    'HEX：' +
-                    esc(x.hex) +
                     '</div>' +
 
+                    '<div style="' +
+                    'color:#38d98a;' +
+                    'font-weight:800">' +
+                    esc(e.label) +
+                    '</div>' +
+
+                    '<div style="color:#ffcf70">' +
+                    '變化：' +
+                    e.diffCount +
+                    ' bytes' +
+                    '</div>' +
+
+                    '<div style="' +
+                    'color:#d5dbea;' +
+                    'word-break:break-all">' +
+                    esc(e.diffText) +
                     '</div>';
 
+                if (e.text) {
+                    html +=
+                        '<div style="' +
+                        'margin-top:2px;' +
+                        'color:#74e3b0;' +
+                        'word-break:break-all">' +
+                        '文字：' +
+                        esc(e.text) +
+                        '</div>';
+                }
+
+                html += '</div>';
+
                 return html;
-            }).join('');
+            })
+            .join('');
     }
 
     /*
-     * 攔截 WebSocket
+     * WebSocket
      */
     try {
         const NativeWebSocket =
@@ -372,7 +402,7 @@
                     ws.addEventListener(
                         'message',
                         function (event) {
-                            processData(
+                            handleData(
                                 'IN',
                                 event.data
                             );
@@ -384,7 +414,7 @@
                     const nativeSend = ws.send;
 
                     ws.send = function (data) {
-                        processData(
+                        handleData(
                             'OUT',
                             data
                         );
@@ -396,7 +426,7 @@
                     };
                 } catch (e) {}
 
-                updateUI();
+                render();
 
                 return ws;
             }
@@ -446,21 +476,23 @@
             position: 'fixed',
             left: '4px',
             bottom: '4px',
-            width: '285px',
-            maxHeight: '42vh',
+            width: '270px',
+            maxHeight: '39vh',
             overflow: 'auto',
             zIndex: '2147483647',
-            background:
-                'rgba(5,12,25,.97)',
+            background: 'rgba(5,12,25,.97)',
             color: '#fff',
-            border:
-                '2px solid #f2c66d',
+            border: '2px solid #f2c66d',
             borderRadius: '9px',
             padding: '7px',
-            fontSize: '8px',
-            lineHeight: '1.28',
+            fontSize: '9px',
+            lineHeight: '1.3',
             fontFamily:
                 '-apple-system,BlinkMacSystemFont,sans-serif',
+
+            /*
+             * 偵測期間不擋牌桌操作
+             */
             pointerEvents: 'none'
         });
 
@@ -469,36 +501,42 @@
             'font-size:12px;' +
             'font-weight:900;' +
             'color:#f2c66d">' +
-            'ROAD AI 牌值定位 V0.8' +
+            'ROAD AI 發牌定位 V0.9' +
             '</div>' +
 
             '<div style="' +
             'color:#38d98a;' +
             'font-weight:800">' +
-            '● 比對發牌封包變化' +
+            '● 等待／比對發牌事件' +
             '</div>' +
 
-            '<div id="road-ai-locator-status"' +
+            '<div id="road-ai-event-status"' +
             ' style="margin-top:4px"></div>' +
 
-            '<div id="road-ai-locator-log"></div>';
+            '<div style="' +
+            'margin-top:3px;' +
+            'color:#91a0bd">' +
+            '重點：57B / 83B / 89B / 109B / 112B' +
+            '</div>' +
+
+            '<div id="road-ai-event-log"></div>';
 
         (
             document.documentElement ||
             document.body
         ).appendChild(box);
 
-        statusBox =
+        statusEl =
             box.querySelector(
-                '#road-ai-locator-status'
+                '#road-ai-event-status'
             );
 
-        logBox =
+        logEl =
             box.querySelector(
-                '#road-ai-locator-log'
+                '#road-ai-event-log'
             );
 
-        updateUI();
+        render();
     }
 
     function waitDOM() {
