@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         ROAD AI Auto Reader Detect
 // @namespace    ROAD-AI
-// @version      0.2
-// @description  ROAD AI 真人桌資料結構偵測器｜可拖曳・可縮小
+// @version      0.3
+// @description  ROAD AI 真人桌資料結構偵測器｜iPhone拖曳・縮小修正版
 // @match        https://new-dd-cn.20299999.com/*
 // @match        https://ew-dd-cn.20299999.com/*
 // @match        https://new-dd-cloudfront.ywjxi.com/*
@@ -15,6 +15,8 @@
 
     if (window.__ROAD_AI_DETECT__) return;
     window.__ROAD_AI_DETECT__ = true;
+
+    const POS_KEY = 'ROAD_AI_DETECT_POS_V03';
 
     let minimized = false;
     let dragging = false;
@@ -37,7 +39,7 @@
         overflow: 'hidden',
         zIndex: '2147483647',
         background: 'rgba(5,12,25,.96)',
-        color: '#ffffff',
+        color: '#fff',
         border: '2px solid #f2c66d',
         borderRadius: '12px',
         fontSize: '11px',
@@ -45,7 +47,6 @@
         fontFamily: '-apple-system,BlinkMacSystemFont,sans-serif',
         boxShadow: '0 4px 18px rgba(0,0,0,.45)',
         pointerEvents: 'auto',
-        touchAction: 'none',
         userSelect: 'none',
         WebkitUserSelect: 'none'
     });
@@ -58,35 +59,48 @@
         alignItems: 'center',
         justifyContent: 'space-between',
         padding: '0 8px',
-        cursor: 'move',
-        touchAction: 'none',
         background: 'rgba(15,27,48,.98)',
         borderRadius: '10px 10px 0 0'
     });
 
-    const title = document.createElement('div');
+    // 只有這個區域負責拖曳
+    const dragHandle = document.createElement('div');
 
-    title.innerHTML =
+    dragHandle.innerHTML =
         '<b style="font-size:13px;color:#f2c66d">' +
         'ROAD AI Auto Reader' +
         '</b>';
 
-    const miniButton = document.createElement('button');
+    Object.assign(dragHandle.style, {
+        flex: '1',
+        height: '36px',
+        display: 'flex',
+        alignItems: 'center',
+        cursor: 'move',
+        touchAction: 'none'
+    });
 
+    // 縮小按鈕
+    const miniButton = document.createElement('button');
+    miniButton.type = 'button';
     miniButton.textContent = '−';
 
     Object.assign(miniButton.style, {
-        width: '28px',
-        height: '28px',
+        width: '30px',
+        height: '30px',
         padding: '0',
+        margin: '0',
         border: '1px solid #66728b',
-        borderRadius: '7px',
+        borderRadius: '8px',
         background: '#17233a',
-        color: '#ffffff',
-        fontSize: '20px',
+        color: '#fff',
+        fontSize: '21px',
         fontWeight: '900',
-        lineHeight: '24px',
-        cursor: 'pointer'
+        lineHeight: '25px',
+        position: 'relative',
+        zIndex: '10',
+        pointerEvents: 'auto',
+        touchAction: 'manipulation'
     });
 
     const content = document.createElement('div');
@@ -98,11 +112,31 @@
         WebkitOverflowScrolling: 'touch'
     });
 
-    header.appendChild(title);
+    // 縮小後使用的 AI 按鈕
+    const bubble = document.createElement('div');
+    bubble.textContent = 'AI';
+
+    Object.assign(bubble.style, {
+        display: 'none',
+        width: '46px',
+        height: '46px',
+        alignItems: 'center',
+        justifyContent: 'center',
+        color: '#f2c66d',
+        fontSize: '14px',
+        fontWeight: '900',
+        borderRadius: '50%',
+        background: 'rgba(5,12,25,.98)',
+        cursor: 'move',
+        touchAction: 'none'
+    });
+
+    header.appendChild(dragHandle);
     header.appendChild(miniButton);
 
     box.appendChild(header);
     box.appendChild(content);
+    box.appendChild(bubble);
 
     document.documentElement.appendChild(box);
 
@@ -166,25 +200,15 @@
 
             '<hr style="border:0;border-top:1px solid #33405c">' +
 
-            '<div>網域：' +
-            location.hostname +
-            '</div>' +
+            '<div>網域：' + location.hostname + '</div>' +
 
-            '<div>Canvas：<b>' +
-            canvases +
-            '</b></div>' +
+            '<div>Canvas：<b>' + canvases + '</b></div>' +
 
-            '<div>iframe：<b>' +
-            iframes +
-            '</b></div>' +
+            '<div>iframe：<b>' + iframes + '</b></div>' +
 
-            '<div>圖片 IMG：<b>' +
-            images +
-            '</b></div>' +
+            '<div>圖片 IMG：<b>' + images + '</b></div>' +
 
-            '<div>Video：<b>' +
-            videos +
-            '</b></div>' +
+            '<div>Video：<b>' + videos + '</b></div>' +
 
             '<div>PLAYER/閒文字：<b>' +
             (hasPlayer ? '找到' : '沒有') +
@@ -217,192 +241,260 @@
             );
     }
 
-    function toggleMinimize() {
+    function savePosition() {
+        try {
+            const r = box.getBoundingClientRect();
 
-        minimized = !minimized;
+            localStorage.setItem(
+                POS_KEY,
+                JSON.stringify({
+                    left: r.left,
+                    top: r.top
+                })
+            );
+        } catch (e) {}
+    }
+
+    function restorePosition() {
+        try {
+            const raw = localStorage.getItem(POS_KEY);
+            if (!raw) return;
+
+            const p = JSON.parse(raw);
+
+            if (
+                typeof p.left !== 'number' ||
+                typeof p.top !== 'number'
+            ) return;
+
+            box.style.right = 'auto';
+
+            box.style.left =
+                Math.max(
+                    0,
+                    Math.min(p.left, window.innerWidth - 50)
+                ) + 'px';
+
+            box.style.top =
+                Math.max(
+                    0,
+                    Math.min(p.top, window.innerHeight - 50)
+                ) + 'px';
+
+        } catch (e) {}
+    }
+
+    function setMinimized(value) {
+        minimized = value;
 
         if (minimized) {
 
+            header.style.display = 'none';
             content.style.display = 'none';
-
-            title.style.display = 'none';
+            bubble.style.display = 'flex';
 
             box.style.width = '46px';
             box.style.height = '46px';
-            box.style.borderRadius = '23px';
-            box.style.overflow = 'hidden';
-
-            header.style.width = '46px';
-            header.style.height = '46px';
-            header.style.padding = '0';
-            header.style.justifyContent = 'center';
-            header.style.borderRadius = '23px';
-
-            miniButton.textContent = 'AI';
-
-            Object.assign(miniButton.style, {
-                width: '42px',
-                height: '42px',
-                border: '0',
-                borderRadius: '21px',
-                background: 'transparent',
-                color: '#f2c66d',
-                fontSize: '13px',
-                fontWeight: '900'
-            });
+            box.style.borderRadius = '50%';
+            box.style.overflow = 'visible';
 
         } else {
+
+            bubble.style.display = 'none';
+            header.style.display = 'flex';
+            content.style.display = 'block';
 
             box.style.width = '210px';
             box.style.height = 'auto';
             box.style.borderRadius = '12px';
             box.style.overflow = 'hidden';
 
-            header.style.width = 'auto';
-            header.style.height = '36px';
-            header.style.padding = '0 8px';
-            header.style.justifyContent = 'space-between';
-            header.style.borderRadius = '10px 10px 0 0';
-
-            title.style.display = 'block';
-
-            miniButton.textContent = '−';
-
-            Object.assign(miniButton.style, {
-                width: '28px',
-                height: '28px',
-                border: '1px solid #66728b',
-                borderRadius: '7px',
-                background: '#17233a',
-                color: '#ffffff',
-                fontSize: '20px',
-                fontWeight: '900'
-            });
-
-            content.style.display = 'block';
-
             detect();
         }
     }
 
-    miniButton.addEventListener('click', function (e) {
+    // iPhone：直接在 touchend 執行縮小
+    miniButton.addEventListener(
+        'touchstart',
+        function (e) {
+            e.stopPropagation();
+        },
+        { passive: true }
+    );
 
+    miniButton.addEventListener(
+        'touchend',
+        function (e) {
+            e.stopPropagation();
+
+            if (e.cancelable) {
+                e.preventDefault();
+            }
+
+            setMinimized(true);
+        },
+        { passive: false }
+    );
+
+    // 電腦滑鼠
+    miniButton.addEventListener('click', function (e) {
         e.preventDefault();
         e.stopPropagation();
 
-        if (moved) {
-            moved = false;
-            return;
-        }
-
-        toggleMinimize();
+        setMinimized(true);
     });
 
-    function dragStart(clientX, clientY) {
-
+    function dragStart(x, y) {
         dragging = true;
         moved = false;
 
         const rect = box.getBoundingClientRect();
 
         box.style.right = 'auto';
-        box.style.bottom = 'auto';
-
         box.style.left = rect.left + 'px';
         box.style.top = rect.top + 'px';
 
-        startX = clientX;
-        startY = clientY;
+        startX = x;
+        startY = y;
 
         startLeft = rect.left;
         startTop = rect.top;
     }
 
-    function dragMove(clientX, clientY) {
-
+    function dragMove(x, y) {
         if (!dragging) return;
 
-        const dx = clientX - startX;
-        const dy = clientY - startY;
+        const dx = x - startX;
+        const dy = y - startY;
 
-        if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
+        if (
+            Math.abs(dx) > 5 ||
+            Math.abs(dy) > 5
+        ) {
             moved = true;
         }
 
-        let newLeft = startLeft + dx;
-        let newTop = startTop + dy;
+        let left = startLeft + dx;
+        let top = startTop + dy;
 
         const rect = box.getBoundingClientRect();
 
         const maxLeft =
-            Math.max(0, window.innerWidth - rect.width);
+            Math.max(
+                0,
+                window.innerWidth - rect.width
+            );
 
         const maxTop =
-            Math.max(0, window.innerHeight - rect.height);
+            Math.max(
+                0,
+                window.innerHeight - rect.height
+            );
 
-        newLeft =
-            Math.max(0, Math.min(newLeft, maxLeft));
+        left =
+            Math.max(
+                0,
+                Math.min(left, maxLeft)
+            );
 
-        newTop =
-            Math.max(0, Math.min(newTop, maxTop));
+        top =
+            Math.max(
+                0,
+                Math.min(top, maxTop)
+            );
 
-        box.style.left = newLeft + 'px';
-        box.style.top = newTop + 'px';
+        box.style.left = left + 'px';
+        box.style.top = top + 'px';
     }
 
     function dragEnd() {
+        if (!dragging) return;
+
         dragging = false;
+        savePosition();
     }
 
-    header.addEventListener(
-        'touchstart',
-        function (e) {
+    function addTouchDrag(el, bubbleMode) {
 
-            if (!e.touches || !e.touches.length) return;
+        el.addEventListener(
+            'touchstart',
+            function (e) {
 
-            const t = e.touches[0];
+                if (!e.touches || !e.touches.length) return;
 
-            dragStart(t.clientX, t.clientY);
+                const t = e.touches[0];
 
-        },
-        { passive: true }
-    );
+                dragStart(t.clientX, t.clientY);
 
-    document.addEventListener(
-        'touchmove',
-        function (e) {
+            },
+            { passive: true }
+        );
 
-            if (!dragging) return;
-            if (!e.touches || !e.touches.length) return;
+        el.addEventListener(
+            'touchmove',
+            function (e) {
 
-            const t = e.touches[0];
+                if (!dragging) return;
+                if (!e.touches || !e.touches.length) return;
 
-            dragMove(t.clientX, t.clientY);
+                const t = e.touches[0];
 
-            if (e.cancelable) {
-                e.preventDefault();
-            }
+                dragMove(t.clientX, t.clientY);
 
-        },
-        { passive: false }
-    );
+                if (e.cancelable) {
+                    e.preventDefault();
+                }
 
-    document.addEventListener(
-        'touchend',
-        function () {
-            dragEnd();
-        },
-        { passive: true }
-    );
+            },
+            { passive: false }
+        );
 
-    header.addEventListener(
+        el.addEventListener(
+            'touchend',
+            function (e) {
+
+                const wasMoved = moved;
+
+                dragEnd();
+
+                if (
+                    bubbleMode &&
+                    !wasMoved
+                ) {
+                    if (e.cancelable) {
+                        e.preventDefault();
+                    }
+
+                    setMinimized(false);
+                }
+
+            },
+            { passive: false }
+        );
+    }
+
+    addTouchDrag(dragHandle, false);
+    addTouchDrag(bubble, true);
+
+    // 電腦滑鼠拖曳
+    dragHandle.addEventListener(
         'mousedown',
         function (e) {
 
             if (e.button !== 0) return;
 
             dragStart(e.clientX, e.clientY);
+            e.preventDefault();
+        }
+    );
 
+    bubble.addEventListener(
+        'mousedown',
+        function (e) {
+
+            if (e.button !== 0) return;
+
+            dragStart(e.clientX, e.clientY);
             e.preventDefault();
         }
     );
@@ -410,7 +502,6 @@
     document.addEventListener(
         'mousemove',
         function (e) {
-
             if (!dragging) return;
 
             dragMove(e.clientX, e.clientY);
@@ -424,6 +515,19 @@
         }
     );
 
+    bubble.addEventListener(
+        'click',
+        function () {
+
+            if (!moved) {
+                setMinimized(false);
+            }
+
+            moved = false;
+        }
+    );
+
+    restorePosition();
     detect();
 
     setInterval(detect, 1000);
@@ -433,11 +537,14 @@
     });
 
     try {
-        observer.observe(document.documentElement, {
-            childList: true,
-            subtree: true,
-            attributes: false
-        });
+        observer.observe(
+            document.documentElement,
+            {
+                childList: true,
+                subtree: true,
+                attributes: false
+            }
+        );
     } catch (e) {}
 
 })();
