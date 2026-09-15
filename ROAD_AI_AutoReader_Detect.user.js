@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ROAD AI Live Packet Detect
+// @name         ROAD AI Card Packet Locator
 // @namespace    ROAD-AI
-// @version      0.7
-// @description  ROAD AI 即時牌面｜WebSocket二進位封包解析
+// @version      0.8
+// @description  ROAD AI 即時牌面｜牌值封包定位器
 // @match        https://new-dd-cn.20299999.com/*
 // @match        https://ew-dd-cn.20299999.com/*
 // @match        https://new-dd-cloudfront.ywjxi.com/*
@@ -14,20 +14,21 @@
 (function () {
     'use strict';
 
-    if (window.__ROAD_AI_PACKET_DETECT__) return;
-    window.__ROAD_AI_PACKET_DETECT__ = true;
+    if (window.__ROAD_AI_CARD_LOCATOR__) return;
+    window.__ROAD_AI_CARD_LOCATOR__ = true;
 
-    const MAX_LOG = 18;
+    const MAX_LOG = 24;
 
     let box = null;
     let statusBox = null;
     let logBox = null;
 
     let wsCount = 0;
-    let packetCount = 0;
-    let binaryCount = 0;
+    let totalPackets = 0;
+    let shownPackets = 0;
 
     const logs = [];
+    const lastBySize = new Map();
 
     function timeNow() {
         const d = new Date();
@@ -47,41 +48,30 @@
             .replace(/>/g, '&gt;');
     }
 
+    function hexByte(v) {
+        return Number(v)
+            .toString(16)
+            .padStart(2, '0')
+            .toUpperCase();
+    }
+
     function bytesToHex(bytes, max) {
         const len = Math.min(bytes.length, max);
         const out = [];
 
         for (let i = 0; i < len; i++) {
-            out.push(
-                bytes[i]
-                    .toString(16)
-                    .padStart(2, '0')
-                    .toUpperCase()
-            );
+            out.push(hexByte(bytes[i]));
         }
 
         return out.join(' ');
     }
 
-    function bytesToDecimal(bytes, max) {
-        const len = Math.min(bytes.length, max);
-        const out = [];
-
-        for (let i = 0; i < len; i++) {
-            out.push(String(bytes[i]));
-        }
-
-        return out.join(',');
-    }
-
-    function tryUTF8(bytes) {
+    function tryText(bytes) {
         try {
-            const decoder =
+            let text =
                 new TextDecoder('utf-8', {
                     fatal: false
-                });
-
-            let text = decoder.decode(bytes);
+                }).decode(bytes);
 
             text = text
                 .replace(/\u0000/g, '·')
@@ -91,10 +81,8 @@
                 )
                 .trim();
 
-            if (!text) return '';
-
-            return text.length > 220
-                ? text.slice(0, 220) + '…'
+            return text.length > 160
+                ? text.slice(0, 160) + '…'
                 : text;
 
         } catch (e) {
@@ -102,46 +90,129 @@
         }
     }
 
-    function looksReadable(text) {
-        if (!text) return false;
+    function textScore(text) {
+        if (!text) return 0;
 
-        let printable = 0;
+        let score = 0;
 
-        for (let i = 0; i < text.length; i++) {
-            const c = text.charCodeAt(i);
+        if (/20\d{12,}/.test(text)) score += 5;
 
-            if (
-                c === 9 ||
-                c === 10 ||
-                c === 13 ||
-                c >= 32
-            ) {
-                printable++;
+        if (
+            /player|banker|tie|card|result|winner|round|game/i
+                .test(text)
+        ) {
+            score += 5;
+        }
+
+        if (/[PBT]/.test(text)) {
+            score += 2;
+        }
+
+        return score;
+    }
+
+    function diffBytes(previous, current) {
+        if (!previous) {
+            return {
+                count: 0,
+                positions: []
+            };
+        }
+
+        const max =
+            Math.max(
+                previous.length,
+                current.length
+            );
+
+        const positions = [];
+
+        for (let i = 0; i < max; i++) {
+            const a = previous[i];
+            const b = current[i];
+
+            if (a !== b) {
+                positions.push(
+                    i + ':' +
+                    (
+                        a === undefined
+                            ? '--'
+                            : hexByte(a)
+                    ) +
+                    '→' +
+                    (
+                        b === undefined
+                            ? '--'
+                            : hexByte(b)
+                    )
+                );
+            }
+
+            if (positions.length >= 20) {
+                break;
             }
         }
 
-        return (
-            printable /
-            Math.max(1, text.length)
-        ) > 0.65;
+        return {
+            count: positions.length,
+            positions: positions
+        };
     }
 
-    function addLog(direction, bytes) {
-        packetCount++;
-        binaryCount++;
+    function shouldShow(bytes, text) {
+        const size = bytes.length;
 
-        const utf8 = tryUTF8(bytes);
+        /*
+         * 優先保留短封包。
+         */
+        if (size <= 140) return true;
+
+        /*
+         * 或封包內有明顯可讀遊戲資訊。
+         */
+        if (textScore(text) >= 2) return true;
+
+        return false;
+    }
+
+    function addPacket(direction, bytes) {
+        totalPackets++;
+
+        const text = tryText(bytes);
+
+        if (!shouldShow(bytes, text)) {
+            updateUI();
+            return;
+        }
+
+        shownPackets++;
+
+        const previous =
+            lastBySize.get(bytes.length);
+
+        const diff =
+            diffBytes(
+                previous,
+                bytes
+            );
+
+        /*
+         * 複製一份，避免原始 buffer 後續被修改。
+         */
+        lastBySize.set(
+            bytes.length,
+            new Uint8Array(bytes)
+        );
 
         logs.unshift({
-            time: timeNow(),
             direction: direction,
+            time: timeNow(),
             size: bytes.length,
-            hex: bytesToHex(bytes, 96),
-            dec: bytesToDecimal(bytes, 48),
-            utf8:
-                looksReadable(utf8)
-                    ? utf8
-                    : ''
+            text: text,
+            score: textScore(text),
+            hex: bytesToHex(bytes, 140),
+            diffCount: diff.count,
+            diff: diff.positions.join('  ')
         });
 
         if (logs.length > MAX_LOG) {
@@ -154,7 +225,7 @@
     async function processData(direction, data) {
         try {
             if (data instanceof ArrayBuffer) {
-                addLog(
+                addPacket(
                     direction,
                     new Uint8Array(data)
                 );
@@ -162,7 +233,7 @@
             }
 
             if (ArrayBuffer.isView(data)) {
-                addLog(
+                addPacket(
                     direction,
                     new Uint8Array(
                         data.buffer,
@@ -180,21 +251,17 @@
                 const buffer =
                     await data.arrayBuffer();
 
-                addLog(
+                addPacket(
                     direction,
                     new Uint8Array(buffer)
                 );
-
                 return;
             }
 
             if (typeof data === 'string') {
-                const encoder =
-                    new TextEncoder();
-
-                addLog(
-                    direction + ' TEXT',
-                    encoder.encode(data)
+                addPacket(
+                    direction + ' TXT',
+                    new TextEncoder().encode(data)
                 );
             }
 
@@ -205,20 +272,16 @@
         if (!statusBox || !logBox) return;
 
         statusBox.innerHTML =
-            'WebSocket：<b>' +
-            wsCount +
-            '</b>　封包：<b>' +
-            packetCount +
-            '</b><br>' +
-
-            'Binary：<b style="color:#f2c66d">' +
-            binaryCount +
+            'WS：<b>' + wsCount + '</b>　' +
+            '全部：<b>' + totalPackets + '</b>　' +
+            '保留：<b style="color:#f2c66d">' +
+            shownPackets +
             '</b>';
 
         if (!logs.length) {
             logBox.innerHTML =
                 '<div style="margin-top:6px;color:#91a0bd">' +
-                '等待 WebSocket 封包…' +
+                '等待發牌封包…' +
                 '</div>';
 
             return;
@@ -245,32 +308,35 @@
                     x.size +
                     'B</b>';
 
-                if (x.utf8) {
+                if (x.text) {
                     html +=
                         '<div style="' +
-                        'margin-top:3px;' +
+                        'margin-top:2px;' +
                         'color:#38d98a;' +
                         'word-break:break-all">' +
                         'TXT：' +
-                        esc(x.utf8) +
+                        esc(x.text) +
+                        '</div>';
+                }
+
+                if (x.diff) {
+                    html +=
+                        '<div style="' +
+                        'margin-top:2px;' +
+                        'color:#ffcf70;' +
+                        'word-break:break-all">' +
+                        'Δ：' +
+                        esc(x.diff) +
                         '</div>';
                 }
 
                 html +=
                     '<div style="' +
-                    'margin-top:3px;' +
-                    'color:#fff;' +
+                    'margin-top:2px;' +
+                    'color:#d5dbea;' +
                     'word-break:break-all">' +
                     'HEX：' +
                     esc(x.hex) +
-                    '</div>' +
-
-                    '<div style="' +
-                    'margin-top:3px;' +
-                    'color:#aab5ca;' +
-                    'word-break:break-all">' +
-                    'DEC：' +
-                    esc(x.dec) +
                     '</div>' +
 
                     '</div>';
@@ -280,7 +346,7 @@
     }
 
     /*
-     * WebSocket 攔截
+     * 攔截 WebSocket
      */
     try {
         const NativeWebSocket =
@@ -299,8 +365,7 @@
                 wsCount++;
 
                 try {
-                    ws.binaryType =
-                        'arraybuffer';
+                    ws.binaryType = 'arraybuffer';
                 } catch (e) {}
 
                 try {
@@ -316,22 +381,19 @@
                 } catch (e) {}
 
                 try {
-                    const nativeSend =
-                        ws.send;
+                    const nativeSend = ws.send;
 
-                    ws.send =
-                        function (data) {
+                    ws.send = function (data) {
+                        processData(
+                            'OUT',
+                            data
+                        );
 
-                            processData(
-                                'OUT',
-                                data
-                            );
-
-                            return nativeSend.apply(
-                                this,
-                                arguments
-                            );
-                        };
+                        return nativeSend.apply(
+                            this,
+                            arguments
+                        );
+                    };
                 } catch (e) {}
 
                 updateUI();
@@ -349,19 +411,24 @@
                 );
             } catch (e) {}
 
-            ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED']
-                .forEach(function (name) {
-                    try {
-                        Object.defineProperty(
-                            RoadAIWebSocket,
-                            name,
-                            {
-                                value:
-                                    NativeWebSocket[name]
-                            }
-                        );
-                    } catch (e) {}
-                });
+            [
+                'CONNECTING',
+                'OPEN',
+                'CLOSING',
+                'CLOSED'
+            ].forEach(function (name) {
+
+                try {
+                    Object.defineProperty(
+                        RoadAIWebSocket,
+                        name,
+                        {
+                            value:
+                                NativeWebSocket[name]
+                        }
+                    );
+                } catch (e) {}
+            });
 
             window.WebSocket =
                 RoadAIWebSocket;
@@ -379,8 +446,8 @@
             position: 'fixed',
             left: '4px',
             bottom: '4px',
-            width: '270px',
-            maxHeight: '40vh',
+            width: '285px',
+            maxHeight: '42vh',
             overflow: 'auto',
             zIndex: '2147483647',
             background:
@@ -390,8 +457,8 @@
                 '2px solid #f2c66d',
             borderRadius: '9px',
             padding: '7px',
-            fontSize: '9px',
-            lineHeight: '1.3',
+            fontSize: '8px',
+            lineHeight: '1.28',
             fontFamily:
                 '-apple-system,BlinkMacSystemFont,sans-serif',
             pointerEvents: 'none'
@@ -402,19 +469,19 @@
             'font-size:12px;' +
             'font-weight:900;' +
             'color:#f2c66d">' +
-            'ROAD AI 封包解析 V0.7' +
+            'ROAD AI 牌值定位 V0.8' +
             '</div>' +
 
             '<div style="' +
             'color:#38d98a;' +
             'font-weight:800">' +
-            '● 即時解析 WebSocket' +
+            '● 比對發牌封包變化' +
             '</div>' +
 
-            '<div id="road-ai-packet-status"' +
+            '<div id="road-ai-locator-status"' +
             ' style="margin-top:4px"></div>' +
 
-            '<div id="road-ai-packet-log"></div>';
+            '<div id="road-ai-locator-log"></div>';
 
         (
             document.documentElement ||
@@ -423,12 +490,12 @@
 
         statusBox =
             box.querySelector(
-                '#road-ai-packet-status'
+                '#road-ai-locator-status'
             );
 
         logBox =
             box.querySelector(
-                '#road-ai-packet-log'
+                '#road-ai-locator-log'
             );
 
         updateUI();
